@@ -1,85 +1,186 @@
 # Leiterprüfung — Web App
 
-Digitale Leiterprüfung gemäß **DGUV Information 208-016**, **BetrSichV** und **DIN EN 131**.
+Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssicheren Dokumentation von Leitern und Tritten gemäß **DGUV Information 208-016**, **BetrSichV §14** und **DIN EN 131**.
+
+---
 
 ## Features
 
-- **Leiterdatenbank** — Alle Leitern und Tritte inventarisieren
-- **Normgerechter Prüffragebogen** — Typspezifische Sicht- und Funktionsprüfung
-- **PDF-Prüfprotokolle** — Exportierbar als rechtssichere Dokumentation
-- **Automatische Prüffristen** — Nächste Prüfung wird automatisch vorgeschlagen
-- **Mobile-first** — Optimiert für die Nutzung am Smartphone
-- **PWA-fähig** — Zum Home-Screen hinzufügen möglich
+### Stammdaten & Inventar
+- **Leiterdatenbank** — Alle Leitern und Tritte zentral erfassen und verwalten
+- **Typspezifische Prüffragen** — Je nach Leitertyp werden automatisch passende Zusatzfragen geladen
+- **Fotodokumentation** — Foto pro Leiter direkt mit der Gerätekamera aufnehmen
+- **Standortverwaltung** — Standorte als Stammdaten pflegen, zentral umbenennen (aktualisiert alle Leitern)
+- **Ausmustern** — Leitern aus dem Prüfzyklus nehmen ohne Verlust der Prüfhistorie
+
+### Prüfablauf
+- **Normgerechter Prüffragebogen** — 11 Basisfragen + typspezifische Zusatzfragen nach DGUV 208-016
+- **Alle Fragen auf einer Seite** — Kein seitenweises Weiterklicken, Fortschrittsanzeige
+- **Mängelerfassung** — Kritische und nicht-kritische Mängel mit Freitextnotiz
+- **Touch-Unterschrift** — Digitale Pflichtunterschrift direkt auf dem Smartphone
+- **Automatische Prüffristen** — Nächste Prüfung wird anhand des konfigurierten Intervalls berechnet
+
+### Protokolle & E-Mail
+- **Echtes PDF-Prüfprotokoll** — DIN A4, eine Seite, direkter Dateidownload (kein Druckdialog)
+- **Automatischer E-Mail-Versand** — PDF als Anhang nach jeder Prüfung via eigenem SMTP-Server
+- **Opt-out pro Prüfung** — E-Mail-Versand für eine einzelne Prüfung deaktivierbar
+- **SMTP-Konfiguration** — Eigenen Mailserver eintragen, Verbindung direkt in der App testen
+
+### Datenhaltung
+- **Server-seitige Persistenz** — Alle Daten werden auf dem Server gespeichert (kein Datenverlust bei Browser-Cache-Löschung)
+- **localStorage als Sofort-Cache** — Schnelle Reaktion ohne Ladezeiten
+- **Automatische Datenmigration** — Bestehende localStorage-Daten werden beim ersten Start auf den Server übertragen
+
+### Dashboard & Übersicht
+- **Statistik-Kacheln** — Gesamtanzahl, i.O., überfällig, nie geprüft (anklickbar, zeigt gefilterte Liste)
+- **Standort-Filter** — Dashboard und Leiterliste nach Standort filterbar
+- **Letzte Prüfungen** — Anklickbar, springt direkt zum Eintrag in der Prüfhistorie
+- **Nächste fällige Prüfungen** — Sortiert nach Datum mit Countdown
+
+---
 
 ## Unterstützte Leitertypen
 
-Stehleiter, Anlegeleiter, Mehrzweckleiter, Trittleiter, Schiebeleiter, Podestleiter
+| Typ | Zusätzliche Prüfpunkte |
+|-----|------------------------|
+| Stehleiter | Spreizsicherung, Plattform |
+| Anlegeleiter | Einhängehaken, Standsicherheit |
+| Mehrzweckleiter | Gelenke/Scharniere, Schiebeführung, Spreizsicherung |
+| Trittleiter | Trittfläche, Klappmechanismus |
+| Schiebeleiter | Schiebeführung, Arretierung, Seilzug |
+| Podestleiter | Plattform, Geländer, Rollen |
 
-## Deployment auf Vercel
+---
 
-### 1. Repository auf GitHub erstellen
+## Technologie
 
-1. Gehe auf [github.com/new](https://github.com/new)
-2. Name: `leiter-pruefung` (oder frei wählbar)
-3. Private oder Public — nach Wunsch
-4. **Kein** README, .gitignore oder License auswählen
-5. "Create repository" klicken
+| Schicht | Technologie |
+|---------|-------------|
+| Frontend | React 18, Vite 6 |
+| PDF | jsPDF + jspdf-autotable |
+| Backend | Node.js, Express |
+| E-Mail | Nodemailer |
+| Datenspeicher | JSON-Dateien in Docker-Volume |
+| Webserver | nginx (statische Dateien + API-Proxy) |
+| Deployment | Docker, Traefik v3, Let's Encrypt |
 
-### 2. Code hochladen
+### Architektur
 
-**Option A — ZIP Upload (einfachster Weg):**
-1. Auf der leeren Repo-Seite auf "uploading an existing file" klicken
-2. Alle Dateien aus diesem ZIP per Drag & Drop hochladen
-3. "Commit changes" klicken
-
-**Option B — Git CLI:**
-```bash
-cd leiter-pruefung
-git init
-git add .
-git commit -m "Initial commit: Leiterprüfung App"
-git branch -M main
-git remote add origin https://github.com/DEIN-USERNAME/leiter-pruefung.git
-git push -u origin main
+```
+Browser (React SPA)
+    │
+    ├── /          → nginx → statische Dateien (dist/)
+    └── /api/      → nginx → Node.js Backend (Port 3001)
+                                │
+                                ├── GET  /data-all        Alle Datensätze laden
+                                ├── GET  /data/:key       Einzelner Datensatz
+                                ├── POST /data/:key       Datensatz speichern
+                                └── POST /send-email      E-Mail mit PDF-Anhang
 ```
 
-### 3. Vercel verbinden
+---
 
-1. Gehe auf [vercel.com](https://vercel.com) und logge dich mit GitHub ein
-2. "Add New Project" klicken
-3. Dein `leiter-pruefung` Repository auswählen
-4. Framework: **Vite** (wird automatisch erkannt)
-5. "Deploy" klicken
-6. Fertig! Deine App ist unter `leiter-pruefung.vercel.app` erreichbar
+## Deployment (Docker + Traefik)
 
-### 4. Custom Domain (optional)
+### Voraussetzungen
+- Docker + Docker Compose
+- Traefik v3 mit Let's Encrypt (bereits laufend, im Host-Netzwerk)
 
-In Vercel unter Settings → Domains kannst du eine eigene Domain verknüpfen,
-z.B. `leiterpruefung.brk-grossheubach.de`.
+### 1. Repository klonen
+
+```bash
+git clone https://github.com/kremer8034/leiter-pruefung.git
+```
+
+### 2. docker-compose.yml anlegen
+
+```yaml
+services:
+  leiter-pruefung:
+    build: ./leiter-pruefung
+    image: leiter-pruefung:latest
+    restart: unless-stopped
+    ports:
+      - "80"
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.leiter-pruefung.rule=Host(`leiter-pruefung.example.com`)
+      - traefik.http.routers.leiter-pruefung.entrypoints=websecure
+      - traefik.http.routers.leiter-pruefung.tls.certresolver=letsencrypt
+      - traefik.http.services.leiter-pruefung.loadbalancer.server.port=80
+
+  leiter-pruefung-server:
+    build: ./leiter-pruefung/server
+    image: leiter-pruefung-server:latest
+    container_name: leiter-pruefung-server
+    restart: unless-stopped
+    environment:
+      - DATA_DIR=/data
+    volumes:
+      - leiter-pruefung-data:/data
+
+volumes:
+  leiter-pruefung-data:
+```
+
+> `leiter-pruefung.example.com` durch die eigene Domain ersetzen.
+
+### 3. Bauen und starten
+
+```bash
+docker compose build
+docker compose up -d
+```
+
+Die App ist danach unter der konfigurierten Domain per HTTPS erreichbar.  
+Beim ersten Aufruf sind keine Daten vorhanden — alles wird in der App selbst eingerichtet.
+
+---
 
 ## Lokal entwickeln
 
 ```bash
+# Frontend
 npm install
-npm run dev
+npm run dev        # → http://localhost:5173
+
+# Backend (separates Terminal)
+cd server
+npm install
+node index.js      # → http://localhost:3001
 ```
 
-Öffnet die App unter http://localhost:5173
+> Im Dev-Modus läuft der Vite-Dev-Server; der nginx-API-Proxy ist nur im Docker-Build aktiv. API-Aufrufe müssen lokal direkt auf Port 3001 zeigen oder per Vite-Proxy konfiguriert werden.
+
+---
+
+## SMTP-Konfiguration
+
+In der App unter **Einstellungen → E-Mail**:
+
+| Anbieter | Host | Port | Hinweis |
+|----------|------|------|---------|
+| Gmail | `smtp.gmail.com` | 587 | App-Passwort erforderlich (kein normales Passwort) |
+| Office 365 | `smtp.office365.com` | 587 | — |
+| Eigener Server | laut Hoster | 587 / 465 | SSL/TLS bei Port 465 aktivieren |
+
+Die Verbindung lässt sich direkt in den Einstellungen per **Test-Button** prüfen — dabei wird eine echte Test-E-Mail mit PDF-Anhang gesendet.
+
+---
 
 ## Rechtsgrundlagen
 
 - Arbeitsschutzgesetz (ArbSchG)
 - Betriebssicherheitsverordnung (BetrSichV) §3, §14
-- TRBS 1201, TRBS 1203, TRBS 2121 Teil 2
-- DGUV Information 208-016
-- DIN EN 131-1 bis -4
-- DIN EN 14183
+- TRBS 1201 — Prüfungen von Arbeitsmitteln
+- TRBS 1203 — Befähigte Personen
+- TRBS 2121 Teil 2 — Gefährdung bei der Verwendung von Leitern
+- DGUV Information 208-016 — Handlungsanleitung Leitern und Tritte
+- DIN EN 131-1 bis -4 — Leitern: Benennungen, Bauarten, Anforderungen
+- DIN EN 14183 — Tritte
 
-## Hinweis
+---
 
-Die Daten werden im **localStorage** des Browsers gespeichert. Das bedeutet:
-- Daten bleiben pro Gerät/Browser erhalten
-- Verschiedene Geräte teilen keine Daten
-- Beim Löschen der Browserdaten gehen die Daten verloren
+## Lizenz
 
-Für eine Multi-User-/Multi-Device-Lösung wäre ein Backend mit Datenbank nötig.
+MIT
