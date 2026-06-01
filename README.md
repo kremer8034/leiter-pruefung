@@ -119,7 +119,8 @@ ist dafür als Vercel-Serverless-Function (`api/[...path].js`) umgesetzt, die Da
 erfolgt in **Supabase** (Postgres) statt in JSON-Dateien.
 
 ### 1. Supabase vorbereiten
-Drei Tabellen werden benötigt (einmalig per SQL anlegen):
+In einem (frischen) Supabase-Projekt einmalig das Schema aus
+[`supabase/schema.sql`](supabase/schema.sql) im SQL-Editor ausführen. Es legt drei Tabellen an:
 
 ```sql
 create table if not exists public.app_kv (
@@ -154,11 +155,15 @@ Unter **Project → Settings → Environment Variables**:
 |------|------|
 | `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-Role-Key aus Supabase (Settings → API). **Geheim halten!** |
+| `CRON_SECRET` | Beliebiger langer Zufallswert. Aktiviert die täglichen Erinnerungs-Mails (`vercel.json` → `crons` ruft `/api/cron/reminders` auf; Vercel sendet diesen Wert als Bearer-Token). Ohne ihn läuft nur der manuelle Versand. |
 
 ### 3. Deployen
 Mit dem Vercel-Dashboard (GitHub-Import) oder der Vercel-CLI. Vercel erkennt Vite automatisch,
 baut nach `dist/` und stellt `api/*` als Functions bereit. `vercel.json` sorgt für das
-SPA-Fallback, damit die QR-Links `/l/<id>` funktionieren.
+SPA-Fallback (QR-Links `/l/<id>`) und konfiguriert den täglichen Cron für die Erinnerungs-Mails.
+
+> Nach dem ersten Aufruf führt die App eine **Ersteinrichtung** durch (erster Administrator).
+> Danach lassen sich unter *Einstellungen → Prüfer* weitere Prüfer anlegen.
 
 > **Wichtig:** Direkt nach dem ersten Deploy die **Ersteinrichtung** durchführen (ersten Administrator
 > anlegen) — bis dahin ist die öffentlich erreichbare App ungeschützt.
