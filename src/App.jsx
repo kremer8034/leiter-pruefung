@@ -414,7 +414,9 @@ const VIEWS = { DASHBOARD:0, LADDERS:1, INSPECTION:2, HISTORY:3, SETTINGS:4 };
 const EMPTY_SETTINGS = {
   inspector: "", company: "BRK Bereitschaft Großheubach", interval: 12, email: "", requestEmail: "",
   smtp: { host:"", port:"587", user:"", pass:"", secure:false },
+  reminders: { enabled:true, leadDays:0, repeatDays:0, recipients:"inspector", customEmail:"", ccAdmins:false, includeYearOverview:true },
 };
+const EMPTY_REMINDERS = EMPTY_SETTINGS.reminders;
 
 export default function App() {
   const [view, setView]               = useState(VIEWS.DASHBOARD);
@@ -499,7 +501,7 @@ export default function App() {
       setLadders(ladrs);
       setInspections(insps);
       setLocations(locs);
-      setSettings({ ...EMPTY_SETTINGS, ...sett, smtp:{...EMPTY_SETTINGS.smtp,...(sett.smtp||{})} });
+      setSettings({ ...EMPTY_SETTINGS, ...sett, smtp:{...EMPTY_SETTINGS.smtp,...(sett.smtp||{})}, reminders:{...EMPTY_REMINDERS,...(sett.reminders||{})} });
       setLoading(false);
     })();
   }, []);
@@ -1712,7 +1714,9 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
 // ─── Einstellungen ───
 function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, currentUser, logout, refreshInspectors }) {
   const isAdmin = currentUser?.role === "admin";
-  const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})}});
+  const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})},reminders:{...EMPTY_REMINDERS,...(settings.reminders||{})}});
+  const rem = form.reminders;
+  const setRem = (patch) => setForm(f => ({...f, reminders:{...f.reminders, ...patch}}));
   const [newLoc, setNewLoc]       = useState("");
   const [editingLoc, setEditingLoc] = useState(null);
   const [editLocVal, setEditLocVal] = useState("");
@@ -1846,13 +1850,59 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
           </div>
           {isAdmin && (
             <div style={S.settingsSection}>
-              <h3 style={S.sectionTitle}>Erinnerungen</h3>
-              <p style={{fontSize:13,color:"#888",marginBottom:12,lineHeight:1.5}}>
-                Prüfer werden automatisch täglich per E-Mail erinnert, sobald das Prüfintervall einer Leiter abgelaufen ist — an die hinterlegte Adresse des Prüfers, der die letzte Prüfung durchgeführt hat (Fallback: alle Admins). Die Mail enthält zusätzlich alle in diesem Kalenderjahr noch nicht geprüften Leitern.
-              </p>
-              <button style={{...S.secondaryBtn,width:"100%",opacity:remBusy?0.6:1}} disabled={remBusy} onClick={sendReminders}>
-                {remBusy ? "Wird gesendet…" : "🔔 Fällige Erinnerungen jetzt senden"}
+              <h3 style={S.sectionTitle}>Erinnerungen (Prüffristen)</h3>
+
+              {/* Logik transparent erklärt — spiegelt die aktuellen Einstellungen wider */}
+              <div style={{background:"#f5f7fa",border:"1px solid #e3e8ef",borderRadius:10,padding:"12px 14px",fontSize:13,color:"#555",lineHeight:1.65,marginBottom:16}}>
+                <strong style={{color:"#333"}}>So funktioniert der Versand:</strong>
+                <ul style={{margin:"8px 0 0",paddingLeft:18}}>
+                  <li>Einmal täglich (morgens) prüft das System automatisch alle aktiven Leitern.</li>
+                  <li>Eine Leiter gilt als fällig {Number(rem.leadDays)>0 ? <><strong>{rem.leadDays} Tag(e) vor</strong> Ablauf</> : <>am <strong>Tag des Ablaufs</strong></>} des Prüfintervalls (aktuell <strong>{form.interval} Monate</strong> ab letzter Prüfung).</li>
+                  <li>Empfänger: <strong>{rem.recipients==="admins"?"alle Administratoren":rem.recipients==="custom"?(rem.customEmail||"feste Adresse (noch leer!)"):"der Prüfer der letzten Prüfung"}</strong>{rem.recipients==="inspector"?" (Fallback: alle Admins, falls keine E-Mail hinterlegt)":""}{rem.ccAdmins?" · zusätzlich alle Admins in Kopie":""}.</li>
+                  <li>{Number(rem.repeatDays)>0 ? <>Erinnerung wird <strong>alle {rem.repeatDays} Tage</strong> wiederholt, bis die Leiter geprüft ist.</> : <>Pro Fälligkeit wird <strong>genau einmal</strong> erinnert.</>}</li>
+                  <li>{rem.includeYearOverview ? "Die Mail enthält zusätzlich eine Übersicht aller in diesem Kalenderjahr noch nicht geprüften Leitern." : "Ohne Kalenderjahr-Übersicht."}</li>
+                  <li>{rem.enabled ? <span style={{color:"#2d6a4f",fontWeight:600}}>Automatischer Versand ist aktiv.</span> : <span style={{color:"#c1121f",fontWeight:600}}>Automatischer Versand ist deaktiviert.</span>}</li>
+                </ul>
+              </div>
+
+              <label style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",fontSize:15,padding:"12px 14px",background:"#f5f5f5",borderRadius:10,marginBottom:14}}>
+                <input type="checkbox" checked={rem.enabled} onChange={e=>setRem({enabled:e.target.checked})} style={{accentColor:DRK,width:20,height:20}} />
+                Automatische Erinnerungen aktiv
+              </label>
+
+              <div style={S.formGrid}>
+                <Field label="Vorlauf (Tage vor Fälligkeit)" value={String(rem.leadDays)} onChange={v=>setRem({leadDays:Math.max(0,parseInt(v)||0)})} placeholder="0" type="number" />
+                <Field label="Wiederholung alle … Tage (0 = einmal)" value={String(rem.repeatDays)} onChange={v=>setRem({repeatDays:Math.max(0,parseInt(v)||0)})} placeholder="0" type="number" />
+              </div>
+
+              <div style={S.fieldWrap}>
+                <label style={S.fieldLabel}>Empfänger</label>
+                <select style={S.select} value={rem.recipients} onChange={e=>setRem({recipients:e.target.value})}>
+                  <option value="inspector">Prüfer der letzten Prüfung (Fallback: Admins)</option>
+                  <option value="admins">Alle Administratoren</option>
+                  <option value="custom">Feste E-Mail-Adresse</option>
+                </select>
+              </div>
+              {rem.recipients==="custom" && (
+                <Field label="Feste Empfänger-Adresse" value={rem.customEmail} onChange={v=>setRem({customEmail:v})} placeholder="pruefung@example.de" type="email" />
+              )}
+
+              <label style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",fontSize:15,padding:"10px 0"}}>
+                <input type="checkbox" checked={rem.ccAdmins} onChange={e=>setRem({ccAdmins:e.target.checked})} style={{accentColor:DRK,width:20,height:20}} />
+                Administratoren zusätzlich in Kopie
+              </label>
+              <label style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",fontSize:15,padding:"10px 0 14px"}}>
+                <input type="checkbox" checked={rem.includeYearOverview} onChange={e=>setRem({includeYearOverview:e.target.checked})} style={{accentColor:DRK,width:20,height:20}} />
+                Übersicht „dieses Kalenderjahr noch nicht geprüft" anhängen
+              </label>
+
+              <button style={S.primaryBtn} onClick={save}>💾 Erinnerungs-Einstellungen speichern</button>
+              <button style={{...S.secondaryBtn,width:"100%",marginTop:10,opacity:remBusy?0.6:1}} disabled={remBusy} onClick={sendReminders}>
+                {remBusy ? "Wird gesendet…" : "🔔 Fällige Erinnerungen jetzt senden (Test)"}
               </button>
+              <p style={{fontSize:12,color:"#aaa",marginTop:10,lineHeight:1.5}}>
+                Der automatische tägliche Versand benötigt die Vercel-Variable <code>CRON_SECRET</code>. Der Test-Button funktioniert auch ohne und nutzt deine Admin-Anmeldung.
+              </p>
             </div>
           )}
         </>
