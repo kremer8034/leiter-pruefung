@@ -4,8 +4,8 @@
   "description": "Leiterprüfung gem. DGUV 208-016, BetrSichV, DIN EN 131",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#1a2332",
-  "theme_color": "#1a2332",
+  "background_color": "#E30613",
+  "theme_color": "#E30613",
   "icons": [
     {
       "src": "/favicon.svg",

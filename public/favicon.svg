@@ -1,4 +1,10 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
-  <rect width="32" height="32" rx="6" fill="#1a2332"/>
-  <text x="16" y="23" text-anchor="middle" font-size="20" fill="#c9a96e">⊼</text>
+  <rect width="32" height="32" rx="6" fill="#E30613"/>
+  <g stroke="#ffffff" stroke-width="2.2" stroke-linecap="round">
+    <line x1="11" y1="5" x2="11" y2="27"/>
+    <line x1="21" y1="5" x2="21" y2="27"/>
+    <line x1="11" y1="10" x2="21" y2="10"/>
+    <line x1="11" y1="16" x2="21" y2="16"/>
+    <line x1="11" y1="22" x2="21" y2="22"/>
+  </g>
 </svg>
