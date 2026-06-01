@@ -20,35 +20,35 @@ function getToken()   { try { return localStorage.getItem(TOKEN_KEY) || ""; } ca
 function setToken(t)  { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch {} }
 function authHeaders(){ const t = getToken(); return t ? { Authorization: "Bearer " + t } : {}; }
 
+async function apiJSON(path, { method = "GET", body } = {}) {
+  const r = await fetch("/api" + path, {
+    method,
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+// ── Authentifizierung ──
 async function authStatus() {
   try { const r = await fetch("/api/auth/status"); if (r.ok) return await r.json(); } catch {}
-  return { configured: false };
+  return { setup: false, hasUsers: true };
 }
-async function authCheck() {
-  try { const r = await fetch("/api/auth/check", { headers: authHeaders() }); if (r.ok) return await r.json(); } catch {}
-  return { configured: false, valid: true };
+async function authMe() {
+  try { const r = await fetch("/api/auth/me", { headers: authHeaders() }); if (r.ok) return (await r.json()).user; } catch {}
+  return null;
 }
-async function authVerify(code) {
-  const r = await fetch("/api/auth/verify", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
-  });
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Anmeldung fehlgeschlagen"); }
-  return await r.json();
-}
-async function authSet(newCode, currentCode) {
-  const r = await fetch("/api/auth/set", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ newCode, currentCode }),
-  });
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Speichern fehlgeschlagen"); }
-  return await r.json();
-}
-async function authClear(currentCode) {
-  const r = await fetch("/api/auth/clear", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ currentCode }),
-  });
-  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Entfernen fehlgeschlagen"); }
-  return await r.json();
-}
+function authLogin(identifier, password) { return apiJSON("/auth/login", { method: "POST", body: { identifier, password } }); }
+function authSetup(name, email, password) { return apiJSON("/auth/setup", { method: "POST", body: { name, email, password } }); }
+
+// ── Benutzerverwaltung ──
+function listUsers()            { return apiJSON("/users"); }
+function createUser(payload)    { return apiJSON("/users", { method: "POST", body: payload }); }
+function updateUser(id, patch)  { return apiJSON("/users/" + id, { method: "PATCH", body: patch }); }
+function deleteUser(id)         { return apiJSON("/users/" + id, { method: "DELETE" }); }
+async function listInspectors() { try { return (await apiJSON("/inspectors")).inspectors || []; } catch { return []; } }
 
 function saveData(key, data) {
   try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
@@ -372,8 +372,10 @@ export default function App() {
   const [toast, setToast]             = useState(null);
   const [highlightedInspId, setHighlightedInspId] = useState(null);
   const [route, setRoute]             = useState(parseRoute);
-  const [authConfigured, setAuthConfigured] = useState(false);
-  const [authValid, setAuthValid]     = useState(true); // bis geprüft: für offene Installation true
+  const [currentUser, setCurrentUser] = useState(null);   // angemeldeter Benutzer
+  const [setupMode, setSetupMode]     = useState(false);  // noch kein Benutzer → Ersteinrichtung
+  const [authReady, setAuthReady]     = useState(false);  // Auth-Status geprüft
+  const [inspectors, setInspectors]   = useState([]);     // aktive Prüfer (für Auswahl)
 
   const showToast = (msg, type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),2800); };
 
@@ -384,15 +386,27 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
-  // Zugangsstatus prüfen (ist ein Code gesetzt? ist das gespeicherte Token gültig?)
+  // Auth-Status prüfen: existieren Benutzer? ist das gespeicherte Token gültig?
   useEffect(() => {
     (async () => {
-      const c = await authCheck();
-      setAuthConfigured(!!c.configured);
-      setAuthValid(c.configured ? !!c.valid : true);
-      if (c.configured && !c.valid) setToken("");
+      const st = await authStatus();
+      setSetupMode(!!st.setup);
+      if (!st.setup) {
+        const me = await authMe();
+        if (me) setCurrentUser(me); else setToken("");
+      }
+      setAuthReady(true);
     })();
   }, []);
+
+  // Nach Login die aktive Prüfer-Liste laden
+  useEffect(() => {
+    if (!currentUser) { setInspectors([]); return; }
+    listInspectors().then(setInspectors);
+  }, [currentUser]);
+
+  const onLoggedIn = (res) => { if (res.token) setToken(res.token); setCurrentUser(res.user); setSetupMode(false); };
+  const logout = () => { setToken(""); setCurrentUser(null); };
 
   // Pfad wechseln (interne Navigation)
   const navigate = (path) => {
@@ -400,9 +414,8 @@ export default function App() {
     setRoute(parseRoute());
   };
 
-  // Aus der öffentlichen Seite heraus in die Prüfung wechseln (nur berechtigt)
+  // Aus der öffentlichen Seite heraus in die Prüfung wechseln (nach Login)
   const startInspectionForLadder = (ladder) => {
-    setAuthConfigured(true); setAuthValid(true);
     setSelectedLadder(ladder);
     setView(VIEWS.INSPECTION);
     navigate("/");
@@ -466,7 +479,8 @@ export default function App() {
         ladder={ladder}
         inspection={ladder ? getLastInspection(ladder.id) : null}
         company={settings.company}
-        authConfigured={authConfigured}
+        loggedIn={!!currentUser}
+        onLoggedIn={onLoggedIn}
         requestEnabled={!!(settings.requestEmail || settings.email)}
         onStartInspection={startInspectionForLadder}
         onOpenApp={() => navigate("/")}
@@ -475,15 +489,15 @@ export default function App() {
     );
   }
 
-  // Admin-App ist bei gesetztem Zugangscode geschützt
-  if (authConfigured && !authValid) {
-    return (
-      <LoginScreen
-        company={settings.company}
-        onSuccess={() => setAuthValid(true)}
-      />
-    );
-  }
+  // Admin-App: Ersteinrichtung bzw. Anmeldung erforderlich
+  if (!authReady) return (
+    <div style={S.loadScreen}>
+      <div style={{fontSize:64,marginBottom:16}}>✚</div>
+      <div style={{fontSize:16,letterSpacing:1}}>Leiterprüfung wird geladen…</div>
+    </div>
+  );
+  if (setupMode) return <SetupScreen company={settings.company} onSuccess={onLoggedIn} />;
+  if (!currentUser) return <LoginScreen company={settings.company} onSuccess={onLoggedIn} />;
 
   const navItems = [
     { v:VIEWS.DASHBOARD, icon:"◉", label:"Home"     },
@@ -517,6 +531,13 @@ export default function App() {
             {n.label==="Home"?"Dashboard":n.label==="Leitern"?"Leiterdatenbank":n.label==="Prüfung"?"Neue Prüfung":n.label==="Historie"?"Prüfhistorie":"Einstellungen"}
           </button>
         ))}
+        <div style={{marginTop:"auto",padding:"16px 24px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
+          <div style={{color:"#fff",fontSize:14,fontWeight:700}}>{currentUser.name}</div>
+          <div style={{color:"rgba(255,255,255,0.6)",fontSize:12,marginBottom:10}}>
+            {currentUser.role==="admin"?"Administrator":"Prüfer/in"}{currentUser.email?` · ${currentUser.email}`:""}
+          </div>
+          <button style={{...S.secondaryBtn,width:"100%",padding:"10px 14px"}} onClick={()=>{setMenuOpen(false);logout();}}>Abmelden</button>
+        </div>
       </nav>
 
       <nav style={S.tabBar}>
@@ -531,19 +552,21 @@ export default function App() {
       <main style={S.main}>
         {view===VIEWS.DASHBOARD  && <DashboardView stats={stats} ladders={activeLadders} inspections={inspections} locations={locations} getLastInspection={getLastInspection} isOverdue={isOverdue} getNextDue={getNextDue} onStartInspection={l=>{setSelectedLadder(l);setView(VIEWS.INSPECTION);}} setView={setView} onInspectionClick={insp=>{setHighlightedInspId(insp.id);setView(VIEWS.HISTORY);}} />}
         {view===VIEWS.LADDERS    && <LaddersView ladders={ladders} saveLadders={saveLadders} locations={locations} inspections={inspections} getLastInspection={getLastInspection} isOverdue={isOverdue} showToast={showToast} settings={settings} />}
-        {view===VIEWS.INSPECTION && <InspectionView ladders={activeLadders} selectedLadder={selectedLadder} setSelectedLadder={setSelectedLadder} inspectionState={inspectionState} setInspectionState={setInspectionState} inspections={inspections} saveInspections={saveInspections} settings={settings} showToast={showToast} setView={setView} />}
+        {view===VIEWS.INSPECTION && <InspectionView ladders={activeLadders} selectedLadder={selectedLadder} setSelectedLadder={setSelectedLadder} inspectionState={inspectionState} setInspectionState={setInspectionState} inspections={inspections} saveInspections={saveInspections} settings={settings} showToast={showToast} setView={setView} inspectors={inspectors} currentUser={currentUser} />}
         {view===VIEWS.HISTORY    && <HistoryView inspections={inspections} ladders={ladders} saveInspections={saveInspections} showToast={showToast} settings={settings} highlightedId={highlightedInspId} clearHighlight={()=>setHighlightedInspId(null)} />}
-        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} authConfigured={authConfigured} setAuthConfigured={setAuthConfigured} setAuthValid={setAuthValid} />}
+        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} currentUser={currentUser} logout={logout} refreshInspectors={()=>listInspectors().then(setInspectors)} />}
       </main>
     </div>
   );
 }
 
 // ─── Öffentliche Leiter-Statusseite (Ziel des QR-Codes) ───
-function PublicLadderView({ ladder, inspection, company, authConfigured, requestEnabled, onStartInspection, onOpenApp, showToast }) {
-  const [pinOpen, setPinOpen] = useState(false);
+function PublicLadderView({ ladder, inspection, company, loggedIn, onLoggedIn, requestEnabled, onStartInspection, onOpenApp, showToast }) {
+  const [loginOpen, setLoginOpen] = useState(false);
   const [reqStatus, setReqStatus] = useState("idle"); // idle | sending | sent | error
   const [reqMsg, setReqMsg]       = useState("");
+
+  const handleStart = () => { loggedIn ? onStartInspection(ladder) : setLoginOpen(true); };
 
   const sendRequest = async () => {
     setReqStatus("sending"); setReqMsg("");
@@ -587,12 +610,11 @@ function PublicLadderView({ ladder, inspection, company, authConfigured, request
 
   return (
     <div style={S.pubShell}>
-      {pinOpen && (
-        <PinModal
-          title="Prüfung starten"
-          subtitle="Nur für berechtigte Prüfer/innen. Bitte Zugangscode eingeben."
-          onClose={() => setPinOpen(false)}
-          onSuccess={() => { setPinOpen(false); onStartInspection(ladder); }}
+      {loginOpen && (
+        <LoginModal
+          subtitle="Nur für berechtigte Prüfer/innen. Bitte anmelden, um die Prüfung zu starten."
+          onClose={() => setLoginOpen(false)}
+          onSuccess={(res) => { setLoginOpen(false); onLoggedIn(res); onStartInspection(ladder); }}
         />
       )}
 
@@ -680,11 +702,11 @@ function PublicLadderView({ ladder, inspection, company, authConfigured, request
                 )}
                 <button
                   style={{ ...(requestEnabled ? S.secondaryBtn : S.primaryBtn), width:"100%", marginTop: requestEnabled ? 12 : 10 }}
-                  onClick={() => { authConfigured ? setPinOpen(true) : onStartInspection(ladder); }}>
+                  onClick={handleStart}>
                   ☑ Prüfung starten (für Prüfer/innen)
                 </button>
                 <p style={{ fontSize:12, color:"#aaa", textAlign:"center", marginTop:8 }}>
-                  {authConfigured ? "Zugangscode erforderlich — nur für berechtigte Prüfer/innen." : "Startet die Leiterprüfung in der App."}
+                  {loggedIn ? "Startet die Leiterprüfung in der App." : "Anmeldung erforderlich — nur für berechtigte Prüfer/innen."}
                 </p>
               </>
             )}
@@ -700,48 +722,54 @@ function PublicLadderView({ ladder, inspection, company, authConfigured, request
   );
 }
 
-// ─── PIN-/Zugangscode-Dialog ───
-function PinModal({ title, subtitle, onClose, onSuccess }) {
-  const [code, setCode] = useState("");
+// ─── Anmeldeformular (E-Mail/Name + Passwort) ───
+function LoginForm({ onSuccess, compact }) {
+  const [identifier, setIdentifier] = useState("");
+  const [password, setPassword]     = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr]   = useState("");
 
   const submit = async () => {
-    if (!code) return;
+    if (!identifier || !password) { setErr("Bitte E-Mail/Name und Passwort eingeben."); return; }
     setBusy(true); setErr("");
     try {
-      const r = await authVerify(code);
-      if (r.token) setToken(r.token);
-      onSuccess();
-    } catch (e) {
-      setErr(e.message || "Zugangscode falsch");
-      setBusy(false);
-    }
+      const res = await authLogin(identifier, password);
+      onSuccess(res);
+    } catch (e) { setErr(e.message || "Anmeldung fehlgeschlagen"); setBusy(false); }
   };
 
   return (
+    <div>
+      <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Anmelden</h3>
+      <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Mit E-Mail (oder Name) und Passwort.</p>
+      <input style={{ ...S.input, marginBottom:10 }} type="text" autoFocus value={identifier}
+        placeholder="E-Mail oder Name" autoComplete="username"
+        onChange={e => setIdentifier(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+      <input style={S.input} type="password" value={password}
+        placeholder="Passwort" autoComplete="current-password"
+        onChange={e => setPassword(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+      {err && <div style={{ color:"#c1121f", fontSize:13, marginTop:10 }}>✗ {err}</div>}
+      <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+        {busy ? "Anmelden…" : "Anmelden"}
+      </button>
+    </div>
+  );
+}
+
+// ─── Login-Dialog (öffentliche Seite) ───
+function LoginModal({ subtitle, onClose, onSuccess }) {
+  return (
     <div style={S.modalOverlay} onClick={onClose}>
       <div style={S.modalBox} onClick={e => e.stopPropagation()}>
-        <h3 style={{ margin:"0 0 6px", fontSize:18 }}>{title}</h3>
-        {subtitle && <p style={{ margin:"0 0 16px", fontSize:14, color:"#888", lineHeight:1.4 }}>{subtitle}</p>}
-        <input
-          style={S.input} type="password" inputMode="text" autoFocus value={code}
-          placeholder="Zugangscode" onChange={e => setCode(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && submit()}
-        />
-        {err && <div style={{ color:"#c1121f", fontSize:13, marginTop:10 }}>✗ {err}</div>}
-        <div style={{ display:"flex", gap:10, marginTop:18 }}>
-          <button style={{ ...S.secondaryBtn, flex:1 }} onClick={onClose}>Abbrechen</button>
-          <button style={{ ...S.primaryBtn, flex:2, marginTop:0, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
-            {busy ? "Prüfe…" : "Anmelden"}
-          </button>
-        </div>
+        {subtitle && <p style={{ margin:"0 0 14px", fontSize:14, color:"#888", lineHeight:1.4 }}>{subtitle}</p>}
+        <LoginForm onSuccess={onSuccess} />
+        <button style={{ ...S.linkBtn, display:"block", margin:"12px auto 0" }} onClick={onClose}>Abbrechen</button>
       </div>
     </div>
   );
 }
 
-// ─── Anmeldebildschirm (geschützte Admin-App) ───
+// ─── Anmeldebildschirm (Admin-App) ───
 function LoginScreen({ company, onSuccess }) {
   return (
     <div style={S.loginShell}>
@@ -752,45 +780,56 @@ function LoginScreen({ company, onSuccess }) {
           <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || ""}</div>
         </div>
         <div style={{ background:"#fff", borderRadius:16, padding:24, boxShadow:"0 8px 32px rgba(0,0,0,0.25)" }}>
-          <PinModalInline onSuccess={onSuccess} />
+          <LoginForm onSuccess={onSuccess} />
         </div>
       </div>
     </div>
   );
 }
 
-// Inline-Variante des PIN-Felds (ohne Overlay) für den Anmeldebildschirm
-function PinModalInline({ onSuccess }) {
-  const [code, setCode] = useState("");
+// ─── Ersteinrichtung: ersten Administrator anlegen ───
+function SetupScreen({ company, onSuccess }) {
+  const [name, setName]         = useState("");
+  const [email, setEmail]       = useState("");
+  const [password, setPassword] = useState("");
+  const [password2, setPassword2] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr]   = useState("");
 
   const submit = async () => {
-    if (!code) return;
+    if (!name.trim()) { setErr("Bitte einen Namen eingeben."); return; }
+    if (password.length < 6) { setErr("Passwort muss mindestens 6 Zeichen haben."); return; }
+    if (password !== password2) { setErr("Die Passwörter stimmen nicht überein."); return; }
     setBusy(true); setErr("");
     try {
-      const r = await authVerify(code);
-      if (r.token) setToken(r.token);
-      onSuccess();
-    } catch (e) {
-      setErr(e.message || "Zugangscode falsch");
-      setBusy(false);
-    }
+      const res = await authSetup(name.trim(), email.trim(), password);
+      onSuccess(res);
+    } catch (e) { setErr(e.message || "Einrichtung fehlgeschlagen"); setBusy(false); }
   };
 
   return (
-    <div>
-      <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Anmelden</h3>
-      <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Bitte Zugangscode eingeben.</p>
-      <input
-        style={S.input} type="password" autoFocus value={code}
-        placeholder="Zugangscode" onChange={e => setCode(e.target.value)}
-        onKeyDown={e => e.key === "Enter" && submit()}
-      />
-      {err && <div style={{ color:"#c1121f", fontSize:13, marginTop:10 }}>✗ {err}</div>}
-      <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
-        {busy ? "Prüfe…" : "Anmelden"}
-      </button>
+    <div style={S.loginShell}>
+      <div style={{ maxWidth:400, width:"100%" }}>
+        <div style={{ textAlign:"center", color:"#fff", marginBottom:20 }}>
+          <div style={{ fontSize:56, marginBottom:8 }}>✚</div>
+          <div style={{ fontSize:20, fontWeight:700 }}>Ersteinrichtung</div>
+          <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || "Leiterprüfung"}</div>
+        </div>
+        <div style={{ background:"#fff", borderRadius:16, padding:24, boxShadow:"0 8px 32px rgba(0,0,0,0.25)" }}>
+          <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Administrator anlegen</h3>
+          <p style={{ margin:"0 0 16px", fontSize:14, color:"#888", lineHeight:1.4 }}>
+            Es existiert noch kein Benutzer. Lege das erste Administrator-Konto an — damit kannst du anschließend weitere Prüfer verwalten.
+          </p>
+          <Field label="Name *" value={name} onChange={setName} placeholder="Vor- und Nachname" />
+          <Field label="E-Mail (Login)" value={email} onChange={setEmail} placeholder="name@example.de" type="email" />
+          <Field label="Passwort *" value={password} onChange={setPassword} placeholder="mind. 6 Zeichen" type="password" />
+          <Field label="Passwort wiederholen *" value={password2} onChange={setPassword2} placeholder="Wiederholen" type="password" />
+          {err && <div style={{ color:"#c1121f", fontSize:13, marginBottom:10 }}>✗ {err}</div>}
+          <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+            {busy ? "Wird angelegt…" : "Administrator anlegen & starten"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1212,7 +1251,7 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
 }
 
 // ─── Prüfung ───
-function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspectionState, setInspectionState, inspections, saveInspections, settings, showToast, setView }) {
+function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspectionState, setInspectionState, inspections, saveInspections, settings, showToast, setView, inspectors, currentUser }) {
   const [step, setStep]           = useState(selectedLadder?1:0);
   const [answers, setAnswers]     = useState({});
   const [notes, setNotes]         = useState({});
@@ -1220,6 +1259,8 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
   const [autoSendEmail, setAutoSendEmail] = useState(true);
   const [emailStatus, setEmailStatus]     = useState(null);
   const [emailError, setEmailError]       = useState("");
+  // Pflicht: Auswahl, wer die Prüfung durchgeführt hat (vorbelegt mit angemeldetem Nutzer)
+  const [inspectorId, setInspectorId] = useState(currentUser?.id || "");
 
   const questions    = selectedLadder ? getQuestionsForType(selectedLadder.type) : [];
   const sections     = [...new Set(questions.map(q=>q.section))];
@@ -1239,13 +1280,17 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
       .catch(e=>{setEmailStatus("error");setEmailError(e.message);});
   };
 
+  const selectedInspector = (inspectors || []).find(i => i.id === inspectorId) || null;
+
   const handleFinish = sig => {
+    if (!selectedInspector) { showToast("Bitte zuerst den Prüfer auswählen.","error"); setStep(2); return; }
     const now=new Date(), nextDate=new Date(now);
     nextDate.setMonth(nextDate.getMonth()+(settings.interval||12));
     const insp={
       id:"P"+Date.now(), ladderId:selectedLadder.id,
       date:now.toISOString(), nextDate:nextDate.toISOString(),
-      inspector:settings.inspector||"—", answers, notes, generalNotes, signature:sig,
+      inspector:selectedInspector.name, inspectorId:selectedInspector.id,
+      answers, notes, generalNotes, signature:sig,
       result:hasCritFail||hasAnyFail?"nicht_bestanden":"bestanden",
     };
     saveInspections([...inspections,insp]);
@@ -1254,7 +1299,7 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
     triggerEmail(insp, selectedLadder);
   };
 
-  const reset = () => { setSelectedLadder(null);setAnswers({});setNotes({});setGeneralNotes("");setStep(0);setInspectionState(null);setEmailStatus(null);setEmailError(""); };
+  const reset = () => { setSelectedLadder(null);setAnswers({});setNotes({});setGeneralNotes("");setStep(0);setInspectionState(null);setEmailStatus(null);setEmailError("");setInspectorId(currentUser?.id||""); };
 
   // Schritt 0
   if (step===0) return (
@@ -1286,8 +1331,18 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
         <div style={S.summaryInfo}>
           <div style={{fontSize:15}}><strong>Leiter:</strong> {selectedLadder.inventoryNr} — {selectedLadder.name}</div>
           <div style={{fontSize:15}}><strong>Standort:</strong> {selectedLadder.location||"—"}</div>
-          <div style={{fontSize:15}}><strong>Prüfer:</strong> {settings.inspector||"—"}</div>
           <div style={{fontSize:15}}><strong>Mängel:</strong> {questions.filter(q=>answers[q.id]==="mangel").length} von {questions.length}</div>
+        </div>
+        <div style={S.fieldWrap}>
+          <label style={S.fieldLabel}>Prüfer/in *</label>
+          {(inspectors||[]).length===0
+            ? <div style={S.hintBox}>Noch keine Prüfer angelegt. Bitte unter <strong>Mehr → Prüfer</strong> Prüfer anlegen.</div>
+            : <select style={{...S.select,...(inspectorId?{}:{borderColor:"#c1121f"})}} value={inspectorId} onChange={e=>setInspectorId(e.target.value)}>
+                <option value="">— Prüfer/in wählen —</option>
+                {inspectors.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}
+              </select>
+          }
+          <div style={{fontSize:12,color:"#888",marginTop:6}}>Pflichtfeld — wer hat die Prüfung durchgeführt? Erscheint im Prüfprotokoll.</div>
         </div>
         {questions.filter(q=>answers[q.id]==="mangel").length>0&&(
           <div style={S.section}>
@@ -1316,7 +1371,10 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
             </label>
           </div>
         )}
-        <button style={{...S.primaryBtn,marginTop:16}} onClick={()=>setStep(3)}>✍ Weiter zur Unterschrift →</button>
+        <button style={{...S.primaryBtn,marginTop:16,opacity:selectedInspector?1:0.5}}
+          onClick={()=>{ if(!selectedInspector){showToast("Bitte Prüfer/in auswählen.","error");return;} setStep(3); }}>
+          ✍ Weiter zur Unterschrift →
+        </button>
       </div>
     );
   }
@@ -1511,7 +1569,8 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
 }
 
 // ─── Einstellungen ───
-function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, authConfigured, setAuthConfigured, setAuthValid }) {
+function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, currentUser, logout, refreshInspectors }) {
+  const isAdmin = currentUser?.role === "admin";
   const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})}});
   const [newLoc, setNewLoc]       = useState("");
   const [editingLoc, setEditingLoc] = useState(null);
@@ -1519,38 +1578,40 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [activeTab, setActiveTab] = useState("allgemein");
   const [smtpTest, setSmtpTest]   = useState(null);
   const [smtpTestMsg, setSmtpTestMsg] = useState("");
-  const [accCur, setAccCur]   = useState("");
-  const [accNew, setAccNew]   = useState("");
-  const [accNew2, setAccNew2] = useState("");
-  const [accBusy, setAccBusy] = useState(false);
+  // Benutzerverwaltung
+  const [users, setUsers]       = useState(null);
+  const [userForm, setUserForm] = useState(null); // null | {id?, name, email, role, active, password}
+  const [userBusy, setUserBusy] = useState(false);
 
-  const saveAccessCode = async () => {
-    if (accNew.length < 4) { showToast("Zugangscode muss mind. 4 Zeichen haben","error"); return; }
-    if (accNew !== accNew2) { showToast("Die beiden Codes stimmen nicht überein","error"); return; }
-    setAccBusy(true);
+  const loadUsers = async () => { try { setUsers((await listUsers()).users || []); } catch (e) { showToast(e.message, "error"); } };
+  useEffect(() => { if (isAdmin && activeTab === "pruefer" && users === null) loadUsers(); }, [isAdmin, activeTab]); // eslint-disable-line
+
+  const emptyUser = { name:"", email:"", role:"pruefer", active:true, password:"" };
+  const saveUser = async () => {
+    const f = userForm;
+    if (!f.name.trim()) { showToast("Name ist Pflicht", "error"); return; }
+    if (!f.id && (!f.password || f.password.length < 6)) { showToast("Passwort (mind. 6 Zeichen) erforderlich", "error"); return; }
+    if (f.id && f.password && f.password.length < 6) { showToast("Passwort muss mind. 6 Zeichen haben", "error"); return; }
+    setUserBusy(true);
     try {
-      const r = await authSet(accNew, accCur);
-      if (r.token) setToken(r.token);
-      setAuthConfigured(true); setAuthValid(true);
-      setAccCur(""); setAccNew(""); setAccNew2("");
-      showToast(authConfigured ? "Zugangscode geändert" : "Zugangscode gesetzt");
+      if (f.id) {
+        const patch = { name: f.name, email: f.email, role: f.role, active: f.active };
+        if (f.password) patch.password = f.password;
+        await updateUser(f.id, patch);
+        showToast("Prüfer aktualisiert");
+      } else {
+        await createUser({ name: f.name, email: f.email, role: f.role, active: f.active, password: f.password });
+        showToast("Prüfer angelegt");
+      }
+      setUserForm(null); await loadUsers(); refreshInspectors && refreshInspectors();
     } catch (e) { showToast(e.message, "error"); }
-    setAccBusy(false);
+    setUserBusy(false);
   };
-
-  const removeAccessCode = async () => {
-    if (!confirm("Zugangsschutz wirklich entfernen? Danach kann jeder die App nutzen.")) return;
-    setAccBusy(true);
-    try {
-      await authClear(accCur);
-      setToken(""); setAuthConfigured(false); setAuthValid(true);
-      setAccCur(""); setAccNew(""); setAccNew2("");
-      showToast("Zugangsschutz entfernt");
-    } catch (e) { showToast(e.message, "error"); }
-    setAccBusy(false);
+  const removeUser = async (u) => {
+    if (!confirm(`Prüfer „${u.name}" wirklich löschen?`)) return;
+    try { await deleteUser(u.id); showToast("Prüfer gelöscht"); await loadUsers(); refreshInspectors && refreshInspectors(); }
+    catch (e) { showToast(e.message, "error"); }
   };
-
-  const logout = () => { setToken(""); setAuthValid(false); };
 
   const save = () => { saveSettings(form); showToast("Einstellungen gespeichert"); };
 
@@ -1590,7 +1651,7 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
 
   const TABS=[
     {id:"allgemein",  label:"Allgemein",  icon:"⚙"},
-    {id:"zugang",     label:"Zugang",     icon:"🔒"},
+    ...(isAdmin ? [{id:"pruefer", label:"Prüfer", icon:"👥"}] : []),
     {id:"email",      label:"E-Mail",     icon:"✉"},
     {id:"standorte",  label:"Standorte",  icon:"📍"},
     {id:"rechtliches",label:"Recht",      icon:"⚖"},
@@ -1600,7 +1661,7 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
     <div style={S.page}>
       <h2 style={S.pageTitle}>Einstellungen</h2>
 
-      <div style={S.settingsTabs}>
+      <div style={{...S.settingsTabs, gridTemplateColumns:`repeat(${TABS.length},1fr)`}}>
         {TABS.map(t=>(
           <button key={t.id} style={{...S.settingsTab,...(activeTab===t.id?S.settingsTabActive:{})}} onClick={()=>setActiveTab(t.id)}>
             <span style={{fontSize:20,marginBottom:2}}>{t.icon}</span>
@@ -1610,48 +1671,85 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
       </div>
 
       {activeTab==="allgemein"&&(
-        <div style={S.settingsSection}>
-          <h3 style={S.sectionTitle}>Prüfer & Organisation</h3>
-          <Field label="Name des Prüfers / Befähigte Person" value={form.inspector} onChange={v=>setForm(f=>({...f,inspector:v}))} placeholder="Vor- und Nachname" />
-          <Field label="Organisation / Unternehmen" value={form.company} onChange={v=>setForm(f=>({...f,company:v}))} placeholder="z.B. BRK Bereitschaft Großheubach" />
-          <div style={S.fieldWrap}>
-            <label style={S.fieldLabel}>Standard-Prüfintervall</label>
-            <select style={S.select} value={form.interval} onChange={e=>setForm(f=>({...f,interval:parseInt(e.target.value)}))}>
-              {[3,6,9,12,18,24].map(m=><option key={m} value={m}>{m} Monate</option>)}
-            </select>
+        <>
+          <div style={{...S.settingsSection,display:"flex",justifyContent:"space-between",alignItems:"center",gap:12,flexWrap:"wrap"}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:"#888",letterSpacing:0.4,textTransform:"uppercase"}}>Angemeldet als</div>
+              <div style={{fontSize:16,fontWeight:700,marginTop:2}}>{currentUser?.name}</div>
+              <div style={{fontSize:13,color:"#888"}}>{isAdmin?"Administrator":"Prüfer/in"}{currentUser?.email?` · ${currentUser.email}`:""}</div>
+            </div>
+            <button style={{...S.secondaryBtn,padding:"10px 18px"}} onClick={logout}>Abmelden</button>
           </div>
-          <button style={S.primaryBtn} onClick={save}>💾 Speichern</button>
-        </div>
+          <div style={S.settingsSection}>
+            <h3 style={S.sectionTitle}>Organisation</h3>
+            <Field label="Organisation / Unternehmen" value={form.company} onChange={v=>setForm(f=>({...f,company:v}))} placeholder="z.B. BRK Bereitschaft Großheubach" />
+            <div style={S.fieldWrap}>
+              <label style={S.fieldLabel}>Standard-Prüfintervall</label>
+              <select style={S.select} value={form.interval} onChange={e=>setForm(f=>({...f,interval:parseInt(e.target.value)}))}>
+                {[3,6,9,12,18,24].map(m=><option key={m} value={m}>{m} Monate</option>)}
+              </select>
+            </div>
+            <button style={S.primaryBtn} onClick={save}>💾 Speichern</button>
+          </div>
+        </>
       )}
 
-      {activeTab==="zugang"&&(
+      {activeTab==="pruefer"&&isAdmin&&(
         <div style={S.settingsSection}>
-          <h3 style={S.sectionTitle}>Zugangsschutz (QR-Code-Prüfung)</h3>
-          <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderRadius:10,marginBottom:16,
-            background:authConfigured?"#d4edda":"#fff3cd",color:authConfigured?"#2d6a4f":"#856404",fontSize:14,fontWeight:600}}>
-            {authConfigured ? "🔒 Aktiv — nur berechtigte Nutzer können Prüfungen starten" : "🔓 Inaktiv — die App ist für jeden ohne Code nutzbar"}
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14,gap:10,flexWrap:"wrap"}}>
+            <h3 style={{...S.sectionTitle,margin:0}}>Prüfer / Benutzer</h3>
+            <button style={{...S.primaryBtn,width:"auto",marginTop:0,padding:"10px 16px"}} onClick={()=>setUserForm({...emptyUser})}>+ Neuer Prüfer</button>
           </div>
-          <p style={{fontSize:14,color:"#888",marginBottom:16,lineHeight:1.5}}>
-            Der Zugangscode schützt das Starten einer Leiterprüfung und das Speichern von Daten. Den QR-Code an der Leiter
-            kann weiterhin <strong>jede Person</strong> scannen, um den Prüfstatus zu sehen — nur das <strong>Starten einer Prüfung</strong> verlangt diesen Code.
+          <p style={{fontSize:13,color:"#888",marginBottom:14,lineHeight:1.5}}>
+            Jeder Prüfer meldet sich mit eigener E-Mail (oder Name) und Passwort an. In der Prüfung wird ausgewählt, wer sie durchgeführt hat — der Name erscheint im Protokoll.
           </p>
-          {authConfigured && (
-            <Field label="Aktueller Zugangscode" value={accCur} onChange={setAccCur} placeholder="Aktueller Code" type="password" />
-          )}
-          <Field label={authConfigured?"Neuer Zugangscode":"Zugangscode festlegen"} value={accNew} onChange={setAccNew} placeholder="mind. 4 Zeichen" type="password" />
-          <Field label="Zugangscode wiederholen" value={accNew2} onChange={setAccNew2} placeholder="Wiederholen" type="password" />
-          <button style={{...S.primaryBtn,opacity:accBusy?0.6:1}} disabled={accBusy} onClick={saveAccessCode}>
-            {authConfigured ? "🔒 Code ändern" : "🔒 Zugangsschutz aktivieren"}
-          </button>
-          {authConfigured && (
-            <div style={{display:"flex",gap:10,marginTop:12}}>
-              <button style={{...S.secondaryBtn,flex:1}} onClick={logout}>Abmelden</button>
-              <button style={{...S.actionBtn,flex:1,color:"#c1121f",borderColor:"#c1121f"}} disabled={accBusy} onClick={removeAccessCode}>Schutz entfernen</button>
+
+          {userForm && (
+            <div style={{border:"1px solid #eee",borderRadius:12,padding:16,marginBottom:16,background:"#fafafa"}}>
+              <h4 style={{margin:"0 0 12px",fontSize:15}}>{userForm.id?"Prüfer bearbeiten":"Neuen Prüfer anlegen"}</h4>
+              <Field label="Name *" value={userForm.name} onChange={v=>setUserForm(f=>({...f,name:v}))} placeholder="Vor- und Nachname" />
+              <Field label="E-Mail (Login)" value={userForm.email} onChange={v=>setUserForm(f=>({...f,email:v}))} placeholder="name@example.de" type="email" />
+              <Field label={userForm.id?"Neues Passwort (leer = unverändert)":"Passwort *"} value={userForm.password} onChange={v=>setUserForm(f=>({...f,password:v}))} placeholder="mind. 6 Zeichen" type="password" />
+              <div style={S.fieldWrap}>
+                <label style={S.fieldLabel}>Rolle</label>
+                <select style={S.select} value={userForm.role} onChange={e=>setUserForm(f=>({...f,role:e.target.value}))}>
+                  <option value="pruefer">Prüfer/in</option>
+                  <option value="admin">Administrator</option>
+                </select>
+              </div>
+              <label style={{display:"flex",alignItems:"center",gap:10,cursor:"pointer",fontSize:15,padding:"10px 0"}}>
+                <input type="checkbox" checked={userForm.active} onChange={e=>setUserForm(f=>({...f,active:e.target.checked}))} style={{accentColor:"#E30613",width:20,height:20}} />
+                Aktiv (kann sich anmelden & ausgewählt werden)
+              </label>
+              <div style={{display:"flex",gap:10,marginTop:10}}>
+                <button style={{...S.secondaryBtn,flex:1}} onClick={()=>setUserForm(null)}>Abbrechen</button>
+                <button style={{...S.primaryBtn,flex:2,marginTop:0,opacity:userBusy?0.6:1}} disabled={userBusy} onClick={saveUser}>💾 Speichern</button>
+              </div>
             </div>
           )}
-          <div style={{marginTop:14,padding:"12px 14px",background:"#f5f5f5",borderRadius:10,fontSize:13,color:"#888",lineHeight:1.7}}>
-            <strong style={{color:"#555"}}>Hinweis:</strong> Wird der Code vergessen, kann er serverseitig durch Löschen der Datei <code>auth.json</code> im Datenverzeichnis zurückgesetzt werden.
-          </div>
+
+          {users===null
+            ? <div style={{fontSize:14,color:"#888",padding:"10px 0"}}>Lädt…</div>
+            : users.length===0
+              ? <div style={{fontSize:14,color:"#888"}}>Noch keine Prüfer angelegt.</div>
+              : users.map(u=>(
+                <div key={u.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"12px 14px",background:"#f8f8f8",borderRadius:10,marginBottom:8,border:"1px solid #eee",gap:10,opacity:u.active?1:0.55}}>
+                  <div style={{minWidth:0}}>
+                    <div style={{fontSize:15,fontWeight:700}}>
+                      {u.name}
+                      {u.role==="admin"&&<span style={{...S.locTag,background:"#fde8b8",color:"#8a6d1b"}}>Admin</span>}
+                      {!u.active&&<span style={S.locTag}>inaktiv</span>}
+                      {u.id===currentUser?.id&&<span style={{...S.locTag,background:"#d4edda",color:"#2d6a4f"}}>Du</span>}
+                    </div>
+                    {u.email&&<div style={{fontSize:13,color:"#888",overflow:"hidden",textOverflow:"ellipsis"}}>{u.email}</div>}
+                  </div>
+                  <div style={{display:"flex",gap:8,flexShrink:0}}>
+                    <button style={S.actionBtn} onClick={()=>setUserForm({id:u.id,name:u.name,email:u.email||"",role:u.role,active:u.active,password:""})}>✏</button>
+                    <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} onClick={()=>removeUser(u)}>🗑</button>
+                  </div>
+                </div>
+              ))
+          }
         </div>
       )}
 

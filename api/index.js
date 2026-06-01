@@ -36,45 +36,80 @@ async function writeStore(key, value) {
   if (error) throw error;
 }
 
-// ─── Zugangsschutz ───
-async function readAuth() {
-  const { data, error } = await supabase.from("app_auth").select("*").eq("id", 1).maybeSingle();
+// ─── Benutzerkonten & Zugangsschutz ───
+function genId() { return "U" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function hashPassword(pw, salt) { return crypto.scryptSync(String(pw), salt, 64).toString("hex"); }
+function verifyPassword(pw, user) {
+  if (!pw || !user || !user.hash) return false;
+  const a = Buffer.from(hashPassword(pw, user.salt), "hex");
+  const b = Buffer.from(user.hash, "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// Globales Token-Secret (Singleton in app_auth.secret), wird bei Bedarf erzeugt.
+async function getSecret() {
+  const { data, error } = await supabase.from("app_auth").select("secret").eq("id", 1).maybeSingle();
+  if (error) throw error;
+  if (data && data.secret) return data.secret;
+  const secret = crypto.randomBytes(32).toString("hex");
+  const up = await supabase.from("app_auth").upsert({ id: 1, secret });
+  if (up.error) throw up.error;
+  return secret;
+}
+function issueToken(secret, uid) {
+  const payload = Buffer.from(JSON.stringify({ uid, exp: Date.now() + TOKEN_TTL_MS })).toString("base64url");
+  const sig = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  return payload + "." + sig;
+}
+function parseToken(secret, token) {
+  if (!secret || !token) return null;
+  const i = token.indexOf(".");
+  if (i < 0) return null;
+  const payload = token.slice(0, i), sig = token.slice(i + 1);
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  const a = Buffer.from(sig), b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  let data;
+  try { data = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")); } catch { return null; }
+  if (!data || !data.exp || data.exp < Date.now()) return null;
+  return data; // { uid, exp }
+}
+function bearer(req) { return (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim(); }
+
+async function countUsers() {
+  const { count, error } = await supabase.from("app_users").select("id", { count: "exact", head: true });
+  if (error) throw error;
+  return count || 0;
+}
+async function getUserById(id) {
+  const { data, error } = await supabase.from("app_users").select("*").eq("id", id).maybeSingle();
   if (error) throw error;
   return data || null;
 }
-async function writeAuth(obj) {
-  const { error } = await supabase.from("app_auth").upsert({ id: 1, ...obj });
+async function findUserByIdentifier(identifier) {
+  const idn = String(identifier || "").trim();
+  if (!idn) return null;
+  let r = await supabase.from("app_users").select("*").ilike("email", idn).eq("active", true);
+  if (r.error) throw r.error;
+  if (r.data && r.data.length) return r.data[0];
+  r = await supabase.from("app_users").select("*").ilike("name", idn).eq("active", true);
+  if (r.error) throw r.error;
+  return (r.data && r.data[0]) || null;
+}
+async function countActiveAdmins() {
+  const { data, error } = await supabase.from("app_users").select("id").eq("role", "admin").eq("active", true);
   if (error) throw error;
+  return (data || []).length;
 }
-async function clearAuth() {
-  const { error } = await supabase.from("app_auth").delete().eq("id", 1);
-  if (error) throw error;
+function publicUser(u) { return u ? { id: u.id, name: u.name, email: u.email, role: u.role, active: u.active } : null; }
+// Authentifizierten (aktiven) Benutzer ermitteln, sonst null.
+async function currentUser(req) {
+  const secret = await getSecret();
+  const t = parseToken(secret, bearer(req));
+  if (!t) return null;
+  const u = await getUserById(t.uid);
+  return u && u.active ? u : null;
 }
-function hashCode(code, salt) { return crypto.scryptSync(String(code), salt, 64).toString("hex"); }
-function verifyCode(code, auth) {
-  if (!code || !auth || !auth.hash) return false;
-  const a = Buffer.from(hashCode(code, auth.salt), "hex");
-  const b = Buffer.from(auth.hash, "hex");
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
-}
-function issueToken(secret) {
-  const exp = String(Date.now() + TOKEN_TTL_MS);
-  const sig = crypto.createHmac("sha256", secret).update(exp).digest("hex");
-  return Buffer.from(exp).toString("base64") + "." + sig;
-}
-function validToken(token, auth) {
-  if (!auth || !auth.secret || !token) return false;
-  const i = token.indexOf(".");
-  if (i < 0) return false;
-  const expB64 = token.slice(0, i), sig = token.slice(i + 1);
-  let exp;
-  try { exp = Buffer.from(expB64, "base64").toString("utf8"); } catch { return false; }
-  const expected = crypto.createHmac("sha256", auth.secret).update(exp).digest("hex");
-  const a = Buffer.from(sig), b = Buffer.from(expected);
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return false;
-  return Number(exp) > Date.now();
-}
-function bearer(req) { return (req.headers.authorization || "").replace(/^Bearer\s+/i, "").trim(); }
 
 // SMTP-Passwort niemals an Clients ausliefern.
 function stripSecret(key, value) {
@@ -135,8 +170,7 @@ export default async function handler(req, res) {
         return res.json({ value: stripSecret(key, v) });
       }
       if (method === "POST") {
-        const auth = await readAuth();
-        if (auth && auth.hash && !validToken(bearer(req), auth)) return res.status(401).json({ error: "Nicht autorisiert" });
+        if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });
         let value = readBody(req).value;
         if (value === undefined) return res.status(400).json({ error: "value fehlt" });
         // Leeres SMTP-Passwort beim Speichern → bestehendes Passwort beibehalten
@@ -151,43 +185,99 @@ export default async function handler(req, res) {
       }
     }
 
-    // ── Zugangsschutz ──
+    // ── Authentifizierung & Benutzer ──
     if (route === "auth/status" && method === "GET") {
-      const a = await readAuth();
-      return res.json({ configured: !!(a && a.hash) });
+      const n = await countUsers();
+      return res.json({ setup: n === 0, hasUsers: n > 0 });
     }
-    if (route === "auth/check" && method === "GET") {
-      const a = await readAuth();
-      if (!a || !a.hash) return res.json({ configured: false, valid: true });
-      return res.json({ configured: true, valid: validToken(bearer(req), a) });
+    if (route === "auth/me" && method === "GET") {
+      const u = await currentUser(req);
+      return res.json({ user: publicUser(u) });
     }
-    if (route === "auth/verify" && method === "POST") {
-      const a = await readAuth();
-      if (!a || !a.hash) return res.json({ ok: true, configured: false, token: null });
-      if (verifyCode(readBody(req).code, a)) return res.json({ ok: true, configured: true, token: issueToken(a.secret) });
-      return res.status(403).json({ ok: false, error: "Zugangscode falsch" });
+    if (route === "auth/login" && method === "POST") {
+      const { identifier, password } = readBody(req);
+      const u = await findUserByIdentifier(identifier);
+      if (!u || !verifyPassword(password, u)) return res.status(403).json({ error: "E-Mail/Name oder Passwort falsch" });
+      const secret = await getSecret();
+      return res.json({ token: issueToken(secret, u.id), user: publicUser(u) });
     }
-    if (route === "auth/set" && method === "POST") {
-      const { newCode, currentCode } = readBody(req);
-      if (!newCode || String(newCode).length < 4) return res.status(400).json({ error: "Zugangscode muss mindestens 4 Zeichen haben" });
-      const a = await readAuth();
-      if (a && a.hash && !verifyCode(currentCode, a)) return res.status(403).json({ error: "Aktueller Zugangscode falsch" });
+    if (route === "auth/setup" && method === "POST") {
+      // Nur erlaubt, solange noch kein Benutzer existiert → erster Administrator
+      if ((await countUsers()) > 0) return res.status(403).json({ error: "Ersteinrichtung bereits abgeschlossen" });
+      const { name, email, password } = readBody(req);
+      if (!name || !password || String(password).length < 6) return res.status(400).json({ error: "Name und Passwort (mind. 6 Zeichen) erforderlich" });
       const salt = crypto.randomBytes(16).toString("hex");
-      const secret = (a && a.secret) || crypto.randomBytes(32).toString("hex");
-      await writeAuth({ hash: hashCode(newCode, salt), salt, secret });
-      return res.json({ ok: true, token: issueToken(secret) });
-    }
-    if (route === "auth/clear" && method === "POST") {
-      const a = await readAuth();
-      if (a && a.hash && !verifyCode(readBody(req).currentCode, a)) return res.status(403).json({ error: "Aktueller Zugangscode falsch" });
-      await clearAuth();
-      return res.json({ ok: true });
+      const u = { id: genId(), name: String(name).trim(), email: (email || "").trim() || null, role: "admin", hash: hashPassword(password, salt), salt, active: true };
+      const ins = await supabase.from("app_users").insert(u);
+      if (ins.error) throw ins.error;
+      const secret = await getSecret();
+      return res.json({ token: issueToken(secret, u.id), user: publicUser(u) });
     }
 
-    // ── E-Mail mit PDF-Anhang (geschützt) ──
+    // Aktive Prüfer für die Auswahl (jeder angemeldete Nutzer)
+    if (route === "inspectors" && method === "GET") {
+      if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });
+      const { data, error } = await supabase.from("app_users").select("id,name,email").eq("active", true).order("name");
+      if (error) throw error;
+      return res.json({ inspectors: data || [] });
+    }
+
+    // ── Benutzerverwaltung (nur Admin) ──
+    if (seg[0] === "users") {
+      const me = await currentUser(req);
+      if (!me || me.role !== "admin") return res.status(403).json({ error: "Nur für Administratoren" });
+
+      if (seg.length === 1 && method === "GET") {
+        const { data, error } = await supabase.from("app_users").select("id,name,email,role,active,created_at").order("created_at");
+        if (error) throw error;
+        return res.json({ users: data || [] });
+      }
+      if (seg.length === 1 && method === "POST") {
+        const { name, email, password, role, active } = readBody(req);
+        if (!name || !password || String(password).length < 6) return res.status(400).json({ error: "Name und Passwort (mind. 6 Zeichen) erforderlich" });
+        const salt = crypto.randomBytes(16).toString("hex");
+        const u = { id: genId(), name: String(name).trim(), email: (email || "").trim() || null,
+          role: role === "admin" ? "admin" : "pruefer", hash: hashPassword(password, salt), salt, active: active !== false };
+        const ins = await supabase.from("app_users").insert(u);
+        if (ins.error) throw ins.error;
+        return res.json({ user: publicUser(u) });
+      }
+      if (seg.length === 2 && (method === "PATCH" || method === "PUT")) {
+        const id = seg[1];
+        const target = await getUserById(id);
+        if (!target) return res.status(404).json({ error: "Benutzer nicht gefunden" });
+        const { name, email, password, role, active } = readBody(req);
+        const patch = {};
+        if (name !== undefined) patch.name = String(name).trim();
+        if (email !== undefined) patch.email = (email || "").trim() || null;
+        if (role !== undefined) patch.role = role === "admin" ? "admin" : "pruefer";
+        if (active !== undefined) patch.active = !!active;
+        if (password) { const salt = crypto.randomBytes(16).toString("hex"); patch.salt = salt; patch.hash = hashPassword(password, salt); }
+        // Letzten aktiven Administrator schützen
+        const losesAdmin = (patch.role && patch.role !== "admin") || patch.active === false;
+        if (losesAdmin && target.role === "admin" && target.active && (await countActiveAdmins()) <= 1) {
+          return res.status(400).json({ error: "Der letzte aktive Administrator kann nicht deaktiviert oder herabgestuft werden." });
+        }
+        const upd = await supabase.from("app_users").update(patch).eq("id", id);
+        if (upd.error) throw upd.error;
+        return res.json({ ok: true });
+      }
+      if (seg.length === 2 && method === "DELETE") {
+        const id = seg[1];
+        const target = await getUserById(id);
+        if (!target) return res.status(404).json({ error: "Benutzer nicht gefunden" });
+        if (target.role === "admin" && target.active && (await countActiveAdmins()) <= 1) {
+          return res.status(400).json({ error: "Der letzte aktive Administrator kann nicht gelöscht werden." });
+        }
+        const del = await supabase.from("app_users").delete().eq("id", id);
+        if (del.error) throw del.error;
+        return res.json({ ok: true });
+      }
+    }
+
+    // ── E-Mail mit PDF-Anhang (nur angemeldet) ──
     if (route === "send-email" && method === "POST") {
-      const auth = await readAuth();
-      if (auth && auth.hash && !validToken(bearer(req), auth)) return res.status(401).json({ error: "Nicht autorisiert" });
+      if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });
       const { to, subject, bodyHtml, pdfBase64, pdfFilename, smtp: bodySmtp } = readBody(req);
       const stored = (await readStore("lp_pruefer")) || {};
       const smtp = bodySmtp && bodySmtp.host && bodySmtp.pass ? bodySmtp : (stored.smtp || {});
