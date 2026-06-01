@@ -92,11 +92,23 @@ function readBody(req) {
   return {};
 }
 
+// Routen-Segmente ermitteln. Bevorzugt den Catch-all-Parameter, fällt aber
+// robust auf req.url zurück (je nach Vercel-Routing ist req.query.path leer).
+function getSegments(req) {
+  const p = req.query && req.query.path;
+  if (Array.isArray(p) && p.length) return p;
+  if (typeof p === "string" && p) return p.split("/").filter(Boolean);
+  const path = (req.url || "").split("?")[0];
+  const parts = path.split("/").filter(Boolean);
+  if (parts[0] === "api") parts.shift();
+  return parts;
+}
+
 export default async function handler(req, res) {
   if (!supabase) {
     return res.status(500).json({ error: "Server nicht konfiguriert: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY fehlen." });
   }
-  const seg = [].concat(req.query.path || []);
+  const seg = getSegments(req);
   const route = seg.join("/");
   const method = req.method;
 
