@@ -362,6 +362,19 @@ export default async function handler(req, res) {
       return res.json({ token: issueToken(secret, u.id), user: publicUser(u) });
     }
 
+    // Eigenes Passwort ändern (jeder angemeldete Nutzer)
+    if (route === "auth/password" && method === "POST") {
+      const me = await currentUser(req);
+      if (!me) return res.status(401).json({ error: "Nicht autorisiert" });
+      const { currentPassword, newPassword } = readBody(req);
+      if (!verifyPassword(currentPassword, me)) return res.status(403).json({ error: "Aktuelles Passwort falsch" });
+      if (!newPassword || String(newPassword).length < 6) return res.status(400).json({ error: "Neues Passwort muss mindestens 6 Zeichen haben" });
+      const salt = crypto.randomBytes(16).toString("hex");
+      const upd = await supabase.from("app_users").update({ hash: hashPassword(newPassword, salt), salt }).eq("id", me.id);
+      if (upd.error) throw upd.error;
+      return res.json({ ok: true });
+    }
+
     // Aktive Prüfer für die Auswahl (jeder angemeldete Nutzer)
     if (route === "inspectors" && method === "GET") {
       if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });

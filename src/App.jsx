@@ -43,6 +43,7 @@ async function authMe() {
 }
 function authLogin(identifier, password) { return apiJSON("/auth/login", { method: "POST", body: { identifier, password } }); }
 function authSetup(name, email, password) { return apiJSON("/auth/setup", { method: "POST", body: { name, email, password } }); }
+function changeOwnPassword(currentPassword, newPassword) { return apiJSON("/auth/password", { method: "POST", body: { currentPassword, newPassword } }); }
 
 // ── Benutzerverwaltung ──
 function listUsers()            { return apiJSON("/users"); }
@@ -1728,6 +1729,23 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [userForm, setUserForm] = useState(null); // null | {id?, name, email, role, active, password}
   const [userBusy, setUserBusy] = useState(false);
   const [remBusy, setRemBusy]   = useState(false);
+  const [pwCur, setPwCur]   = useState("");
+  const [pwNew, setPwNew]   = useState("");
+  const [pwNew2, setPwNew2] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
+
+  const changePassword = async () => {
+    if (!pwCur) { showToast("Bitte aktuelles Passwort eingeben","error"); return; }
+    if (pwNew.length < 6) { showToast("Neues Passwort: mind. 6 Zeichen","error"); return; }
+    if (pwNew !== pwNew2) { showToast("Die neuen Passwörter stimmen nicht überein","error"); return; }
+    setPwBusy(true);
+    try {
+      await changeOwnPassword(pwCur, pwNew);
+      setPwCur(""); setPwNew(""); setPwNew2("");
+      showToast("Passwort geändert");
+    } catch (e) { showToast(e.message, "error"); }
+    setPwBusy(false);
+  };
 
   const sendReminders = async () => {
     if (!confirm("Jetzt Erinnerungs-E-Mails für alle fälligen Leitern senden?")) return;
@@ -1837,6 +1855,17 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
             </div>
             <button style={{...S.secondaryBtn,padding:"10px 18px"}} onClick={logout}>Abmelden</button>
           </div>
+
+          <div style={S.settingsSection}>
+            <h3 style={S.sectionTitle}>Mein Passwort ändern</h3>
+            <Field label="Aktuelles Passwort" value={pwCur} onChange={setPwCur} placeholder="Aktuelles Passwort" type="password" />
+            <Field label="Neues Passwort" value={pwNew} onChange={setPwNew} placeholder="mind. 6 Zeichen" type="password" />
+            <Field label="Neues Passwort wiederholen" value={pwNew2} onChange={setPwNew2} placeholder="Wiederholen" type="password" />
+            <button style={{...S.primaryBtn,opacity:pwBusy?0.6:1}} disabled={pwBusy} onClick={changePassword}>
+              {pwBusy ? "Wird geändert…" : "🔑 Passwort ändern"}
+            </button>
+          </div>
+
           <div style={S.settingsSection}>
             <h3 style={S.sectionTitle}>Organisation</h3>
             <Field label="Organisation / Unternehmen" value={form.company} onChange={v=>setForm(f=>({...f,company:v}))} placeholder="z.B. BRK Bereitschaft Großheubach" />
