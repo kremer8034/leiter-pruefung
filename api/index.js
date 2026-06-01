@@ -154,11 +154,23 @@ function rhead(cells) {
 async function runReminders() {
   const settings = (await readStore("lp_pruefer")) || {};
   const smtp = settings.smtp || {};
+
+  // Konfigurierbare Logik (Einstellungen → Allgemein → Erinnerungen)
+  const cfg = settings.reminders || {};
+  const enabled = cfg.enabled !== false;
+  const leadDays = Math.max(0, parseInt(cfg.leadDays) || 0);
+  const repeatDays = Math.max(0, parseInt(cfg.repeatDays) || 0);
+  const mode = cfg.recipients || "inspector";        // inspector | admins | custom
+  const customEmail = String(cfg.customEmail || "").trim();
+  const ccAdmins = !!cfg.ccAdmins;
+  const includeOverview = cfg.includeYearOverview !== false;
+
+  if (!enabled) return { ok: true, sent: 0, due: 0, disabled: true };
   if (!smtp.host || !smtp.user || !smtp.pass) return { ok: false, error: "Kein SMTP konfiguriert", sent: 0, due: 0 };
 
   const ladders = (await readStore("lp_ladders")) || [];
   const inspections = (await readStore("lp_inspections")) || [];
-  const reminded = (await readStore("lp_reminders")) || {}; // { ladderId: nextDateISO }
+  const reminded = (await readStore("lp_reminders")) || {}; // { ladderId: {nextDate,lastSent} | nextDateISO(alt) }
 
   const { data: userRows } = await supabase.from("app_users").select("id,email,role,active");
   const usersById = {}; (userRows || []).forEach(u => { usersById[u.id] = u; });
@@ -167,6 +179,10 @@ async function runReminders() {
   const today = new Date();
   const todayStr = today.toISOString().slice(0, 10);
   const year = today.getFullYear();
+  // Fälligkeitsschwelle = heute + Vorlauf
+  const threshold = new Date(today); threshold.setDate(threshold.getDate() + leadDays);
+  const thresholdStr = threshold.toISOString().slice(0, 10);
+  const daysBetween = (a, b) => Math.round((new Date(b) - new Date(a)) / 86400000);
 
   // Letzte Prüfung je Leiter
   const lastByLadder = {};
@@ -181,25 +197,38 @@ async function runReminders() {
     .map(l => ({ ladder: l, lastDate: lastByLadder[l.id]?.date || null }))
     .sort((a, b) => String(a.ladder.inventoryNr || "").localeCompare(String(b.ladder.inventoryNr || "")));
 
-  // Fällige Leitern (Intervall abgelaufen) — pro Zyklus nur einmal erinnern
+  // Empfänger für eine fällige Leiter bestimmen
+  const recipientsFor = (d) => {
+    let base;
+    if (mode === "admins") base = adminEmails.slice();
+    else if (mode === "custom") base = customEmail ? [customEmail] : [];
+    else { const u = usersById[d.last.inspectorId]; base = (u && u.email) ? [u.email] : adminEmails.slice(); }
+    if (ccAdmins) base = base.concat(adminEmails);
+    return [...new Set(base.filter(Boolean))];
+  };
+
+  // Fällige Leitern ermitteln (inkl. Vorlauf, Wiederholung, einmal-pro-Zyklus)
   const due = [];
   for (const l of ladders) {
     if (l.retired) continue;
     const last = lastByLadder[l.id];
     if (!last || !last.nextDate) continue;
-    if (String(last.nextDate).slice(0, 10) > todayStr) continue;     // noch nicht fällig
-    if (reminded[l.id] === last.nextDate) continue;                  // bereits erinnert
+    if (String(last.nextDate).slice(0, 10) > thresholdStr) continue;     // noch nicht fällig (Vorlauf berücksichtigt)
+    const prev = reminded[l.id];
+    const prevCycle = typeof prev === "string" ? prev : prev?.nextDate;
+    const prevSent = typeof prev === "object" ? prev?.lastSent : null;
+    if (prevCycle === last.nextDate) {                                   // gleicher Fälligkeits-Zyklus
+      if (repeatDays === 0) continue;                                    // nur einmal
+      if (prevSent && daysBetween(prevSent, todayStr) < repeatDays) continue; // Wiederholung noch nicht fällig
+    }
     due.push({ ladder: l, last });
   }
   if (due.length === 0) return { ok: true, sent: 0, due: 0 };
 
-  // Empfänger ermitteln & gruppieren
+  // Nach Empfänger gruppieren
   const groups = new Map(); // email -> [{ladder,last}]
   for (const d of due) {
-    const u = usersById[d.last.inspectorId];
-    const recipients = (u && u.email) ? [u.email] : adminEmails;
-    if (!recipients || recipients.length === 0) continue;
-    for (const email of recipients) {
+    for (const email of recipientsFor(d)) {
       if (!groups.has(email)) groups.set(email, []);
       groups.get(email).push(d);
     }
@@ -219,7 +248,7 @@ async function runReminders() {
   let sent = 0;
   for (const [email, items] of groups) {
     const dueTable = `<table style="width:100%;border-collapse:collapse;margin-top:6px;">
-        ${rhead(["Inventar-Nr.", "Bezeichnung", "Standort", "Letzte Prüfung", "Fällig seit/am"])}
+        ${rhead(["Inventar-Nr.", "Bezeichnung", "Standort", "Letzte Prüfung", "Fällig am"])}
         ${items.map(({ ladder, last }) => rrow([`<strong>${ladder.inventoryNr || "—"}</strong>`, ladder.name || "—", ladder.location || "—", fmtDate(last.date), fmtDate(last.nextDate)])).join("")}
       </table>`;
     const html = `
@@ -228,11 +257,11 @@ async function runReminders() {
     <h2 style="margin:0;font-size:18px;">⏰ Leiterprüfung fällig</h2>
   </div>
   <div style="padding:20px;background:#f9f9f9;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;">
-    <p style="margin:0 0 12px;font-size:15px;">Bei folgenden Leitern ist das Prüfintervall abgelaufen — bitte erneut prüfen:</p>
+    <p style="margin:0 0 12px;font-size:15px;">Bei folgenden Leitern steht die Prüfung an — bitte (erneut) prüfen:</p>
     ${dueTable}
-    <h3 style="font-size:15px;margin:22px 0 6px;">Im Kalenderjahr ${year} noch nicht geprüft</h3>
+    ${includeOverview ? `<h3 style="font-size:15px;margin:22px 0 6px;">Im Kalenderjahr ${year} noch nicht geprüft</h3>
     <p style="margin:0 0 6px;font-size:13px;color:#666;">Diese Leitern könnten gleich mitgeprüft werden:</p>
-    ${overviewTable}
+    ${overviewTable}` : ""}
     <p style="margin:18px 0 0;font-size:12px;color:#888;">Automatische Erinnerung der Leiterprüfung · ${today.toLocaleDateString("de-DE")}</p>
   </div>
 </div>`;
@@ -245,9 +274,7 @@ async function runReminders() {
 
   // Erinnerte Zyklen markieren (nur die mit Empfänger)
   for (const d of due) {
-    const u = usersById[d.last.inspectorId];
-    const recipients = (u && u.email) ? [u.email] : adminEmails;
-    if (recipients && recipients.length) reminded[d.ladder.id] = d.last.nextDate;
+    if (recipientsFor(d).length) reminded[d.ladder.id] = { nextDate: d.last.nextDate, lastSent: todayStr };
   }
   await writeStore("lp_reminders", reminded);
 
