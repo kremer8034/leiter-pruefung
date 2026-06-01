@@ -419,6 +419,15 @@ const EMPTY_SETTINGS = {
 };
 const EMPTY_REMINDERS = EMPTY_SETTINGS.reminders;
 
+// Reiter im Einstellungsbereich (auch im Seitenmenü als Unterpunkte nutzbar)
+const SETTINGS_TABS = [
+  { id:"allgemein",   label:"Allgemein",   icon:"⚙️" },
+  { id:"pruefer",     label:"Prüfer",      icon:"👥", adminOnly:true },
+  { id:"email",       label:"E-Mail",      icon:"✉️" },
+  { id:"standorte",   label:"Standorte",   icon:"📍" },
+  { id:"rechtliches", label:"Recht",       icon:"⚖️" },
+];
+
 export default function App() {
   const [view, setView]               = useState(VIEWS.DASHBOARD);
   const [ladders, setLadders]         = useState([]);
@@ -436,6 +445,7 @@ export default function App() {
   const [setupMode, setSetupMode]     = useState(false);  // noch kein Benutzer → Ersteinrichtung
   const [authReady, setAuthReady]     = useState(false);  // Auth-Status geprüft
   const [inspectors, setInspectors]   = useState([]);     // aktive Prüfer (für Auswahl)
+  const [settingsTab, setSettingsTab] = useState("allgemein"); // aktiver Einstellungs-Reiter
 
   const showToast = (msg, type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),2800); };
 
@@ -584,14 +594,31 @@ export default function App() {
 
       {menuOpen && <div style={S.overlay} onClick={()=>setMenuOpen(false)} />}
       <nav style={{...S.mobileNav,transform:menuOpen?"translateX(0)":"translateX(-100%)"}}>
-        {navItems.map(n=>(
-          <button key={n.v} style={{...S.navItem,...(view===n.v?S.navItemActive:{})}}
-            onClick={()=>{setView(n.v);setMenuOpen(false);}}>
-            <span style={S.navIcon}>{n.icon}</span>
-            {n.label==="Start"?"Dashboard":n.label==="Leitern"?"Leiterdatenbank":n.label==="Prüfung"?"Neue Prüfung":n.label==="Historie"?"Prüfhistorie":"Einstellungen"}
+        <div style={{flex:1,overflowY:"auto",paddingTop:8}}>
+          {navItems.filter(n=>n.v!==VIEWS.SETTINGS).map(n=>(
+            <button key={n.v} style={{...S.navItem,...(view===n.v?S.navItemActive:{})}}
+              onClick={()=>{setView(n.v);setMenuOpen(false);}}>
+              <span style={S.navIcon}>{n.icon}</span>
+              {n.label==="Start"?"Dashboard":n.label==="Leitern"?"Leiterdatenbank":n.label==="Prüfung"?"Neue Prüfung":"Prüfhistorie"}
+            </button>
+          ))}
+
+          {/* Einstellungen mit Unterpunkten (alle Reiter) */}
+          <button style={{...S.navItem,...(view===VIEWS.SETTINGS?S.navItemActive:{})}}
+            onClick={()=>{setView(VIEWS.SETTINGS);setSettingsTab("allgemein");setMenuOpen(false);}}>
+            <span style={S.navIcon}>⚙️</span>Einstellungen
           </button>
-        ))}
-        <div style={{marginTop:"auto",padding:"16px 24px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
+          {SETTINGS_TABS.filter(t=>!t.adminOnly||currentUser.role==="admin").map(t=>{
+            const active = view===VIEWS.SETTINGS && settingsTab===t.id;
+            return (
+              <button key={t.id} style={{...S.navSubItem,...(active?S.navSubItemActive:{})}}
+                onClick={()=>{setView(VIEWS.SETTINGS);setSettingsTab(t.id);setMenuOpen(false);}}>
+                <span style={{width:22,textAlign:"center",fontSize:16}}>{t.icon}</span>{t.label}
+              </button>
+            );
+          })}
+        </div>
+        <div style={{padding:"16px 24px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
           <div style={{color:"#fff",fontSize:14,fontWeight:700}}>{currentUser.name}</div>
           <div style={{color:"rgba(255,255,255,0.6)",fontSize:12,marginBottom:10}}>
             {currentUser.role==="admin"?"Administrator":"Prüfer/in"}{currentUser.email?` · ${currentUser.email}`:""}
@@ -614,7 +641,7 @@ export default function App() {
         {view===VIEWS.LADDERS    && <LaddersView ladders={ladders} saveLadders={saveLadders} locations={locations} inspections={inspections} getLastInspection={getLastInspection} isOverdue={isOverdue} showToast={showToast} settings={settings} />}
         {view===VIEWS.INSPECTION && <InspectionView ladders={activeLadders} selectedLadder={selectedLadder} setSelectedLadder={setSelectedLadder} inspectionState={inspectionState} setInspectionState={setInspectionState} inspections={inspections} saveInspections={saveInspections} settings={settings} showToast={showToast} setView={setView} inspectors={inspectors} currentUser={currentUser} />}
         {view===VIEWS.HISTORY    && <HistoryView inspections={inspections} ladders={ladders} saveInspections={saveInspections} showToast={showToast} settings={settings} highlightedId={highlightedInspId} clearHighlight={()=>setHighlightedInspId(null)} />}
-        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} currentUser={currentUser} logout={logout} refreshInspectors={()=>listInspectors().then(setInspectors)} />}
+        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} currentUser={currentUser} logout={logout} refreshInspectors={()=>listInspectors().then(setInspectors)} activeTab={settingsTab} setActiveTab={setSettingsTab} />}
       </main>
     </div>
   );
@@ -1713,7 +1740,7 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
 }
 
 // ─── Einstellungen ───
-function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, currentUser, logout, refreshInspectors }) {
+function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, currentUser, logout, refreshInspectors, activeTab, setActiveTab }) {
   const isAdmin = currentUser?.role === "admin";
   const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})},reminders:{...EMPTY_REMINDERS,...(settings.reminders||{})}});
   const rem = form.reminders;
@@ -1721,7 +1748,6 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [newLoc, setNewLoc]       = useState("");
   const [editingLoc, setEditingLoc] = useState(null);
   const [editLocVal, setEditLocVal] = useState("");
-  const [activeTab, setActiveTab] = useState("allgemein");
   const [smtpTest, setSmtpTest]   = useState(null);
   const [smtpTestMsg, setSmtpTestMsg] = useState("");
   // Benutzerverwaltung
@@ -1824,13 +1850,7 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
     } catch(e){ setSmtpTest("error"); setSmtpTestMsg(e.message); }
   };
 
-  const TABS=[
-    {id:"allgemein",  label:"Allgemein",  icon:"⚙️"},
-    ...(isAdmin ? [{id:"pruefer", label:"Prüfer", icon:"👥"}] : []),
-    {id:"email",      label:"E-Mail",     icon:"✉️"},
-    {id:"standorte",  label:"Standorte",  icon:"📍"},
-    {id:"rechtliches",label:"Recht",      icon:"⚖️"},
-  ];
+  const TABS = SETTINGS_TABS.filter(t => !t.adminOnly || isAdmin);
 
   return (
     <div style={S.page}>
@@ -2132,9 +2152,11 @@ const S = {
 
   overlay:      { position:"fixed", inset:0, background:"rgba(0,0,0,0.4)", zIndex:200 },
   mobileNav:    { position:"fixed", top:0, left:0, bottom:0, width:270, background:"#1A1A1A", zIndex:300, transition:"transform 0.25s ease", paddingTop:64, display:"flex", flexDirection:"column", gap:2 },
-  navItem:      { display:"flex", alignItems:"center", gap:14, padding:"16px 24px", background:"none", border:"none", color:"#fff", fontSize:16, cursor:"pointer", textAlign:"left", width:"100%", minHeight:52 },
+  navItem:      { display:"flex", alignItems:"center", gap:14, padding:"15px 24px", background:"none", border:"none", color:"#fff", fontSize:16, cursor:"pointer", textAlign:"left", width:"100%", minHeight:52 },
   navItemActive:{ background:"rgba(227,6,19,0.2)", borderRight:`3px solid ${DRK}` },
   navIcon:      { fontSize:20, width:26, textAlign:"center" },
+  navSubItem:   { display:"flex", alignItems:"center", gap:12, padding:"11px 24px 11px 42px", background:"none", border:"none", color:"rgba(255,255,255,0.72)", fontSize:14, cursor:"pointer", textAlign:"left", width:"100%", minHeight:44 },
+  navSubItemActive:{ background:"rgba(227,6,19,0.22)", color:"#fff", borderRight:`3px solid ${DRK}` },
 
   tabBar:      { position:"fixed", bottom:0, left:0, right:0, background:"#fff", display:"flex", zIndex:100, boxShadow:"0 -2px 8px rgba(0,0,0,0.1)", borderTop:`2px solid ${DRK}`, paddingBottom:"env(safe-area-inset-bottom,0px)" },
   tabItem:     { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, padding:"7px 0", margin:"6px 5px", background:"none", border:"none", color:"#777", cursor:"pointer", minHeight:50, borderRadius:14, fontWeight:600, transition:"background 0.15s,color 0.15s" },
