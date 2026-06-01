@@ -1,23 +1,60 @@
 import { useState, useEffect, useRef } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
+import QRCode from "qrcode";
 
 // ─── Storage (Server + localStorage) ───
 const LADDERS_KEY     = "lp_ladders";
 const INSPECTIONS_KEY = "lp_inspections";
 const PRUEFER_KEY     = "lp_pruefer";
 const LOCATIONS_KEY   = "lp_locations";
+const TOKEN_KEY       = "lp_token";
 
 function lsRead(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
   catch { return fallback; }
 }
 
+// ─── Zugangs-Token (für berechtigte Nutzer) ───
+function getToken()   { try { return localStorage.getItem(TOKEN_KEY) || ""; } catch { return ""; } }
+function setToken(t)  { try { t ? localStorage.setItem(TOKEN_KEY, t) : localStorage.removeItem(TOKEN_KEY); } catch {} }
+function authHeaders(){ const t = getToken(); return t ? { Authorization: "Bearer " + t } : {}; }
+
+async function authStatus() {
+  try { const r = await fetch("/api/auth/status"); if (r.ok) return await r.json(); } catch {}
+  return { configured: false };
+}
+async function authCheck() {
+  try { const r = await fetch("/api/auth/check", { headers: authHeaders() }); if (r.ok) return await r.json(); } catch {}
+  return { configured: false, valid: true };
+}
+async function authVerify(code) {
+  const r = await fetch("/api/auth/verify", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Anmeldung fehlgeschlagen"); }
+  return await r.json();
+}
+async function authSet(newCode, currentCode) {
+  const r = await fetch("/api/auth/set", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ newCode, currentCode }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Speichern fehlgeschlagen"); }
+  return await r.json();
+}
+async function authClear(currentCode) {
+  const r = await fetch("/api/auth/clear", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ currentCode }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || "Entfernen fehlgeschlagen"); }
+  return await r.json();
+}
+
 function saveData(key, data) {
   try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
   fetch("/api/data/" + key, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ value: data }),
   }).catch(() => {});
 }
@@ -28,6 +65,15 @@ async function loadAllFromServer() {
     if (r.ok) return await r.json();
   } catch {}
   return null;
+}
+
+// ─── Öffentlicher Link / QR-Code je Leiter ───
+function ladderPublicUrl(ladder) {
+  return `${window.location.origin}/l/${encodeURIComponent(ladder.id)}`;
+}
+function parseRoute() {
+  const m = window.location.pathname.match(/^\/l\/([^/]+)\/?$/);
+  return m ? { type: "public", ladderId: decodeURIComponent(m[1]) } : { type: "app" };
 }
 
 // ─── Leitertypen & Materialien ───
@@ -278,7 +324,7 @@ async function sendEmailAPI(inspection, ladder, emailTo, smtp) {
 
   const resp = await fetch("/api/send-email", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ to: emailTo, subject: `Prüfprotokoll ${ladder.inventoryNr} – ${new Date(inspection.date).toLocaleDateString("de-DE")}`, bodyHtml, pdfBase64, pdfFilename: fn, smtp }),
   });
   if (!resp.ok) {
@@ -314,8 +360,42 @@ export default function App() {
   const [menuOpen, setMenuOpen]       = useState(false);
   const [toast, setToast]             = useState(null);
   const [highlightedInspId, setHighlightedInspId] = useState(null);
+  const [route, setRoute]             = useState(parseRoute);
+  const [authConfigured, setAuthConfigured] = useState(false);
+  const [authValid, setAuthValid]     = useState(true); // bis geprüft: für offene Installation true
 
   const showToast = (msg, type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),2800); };
+
+  // Browser-Navigation (Zurück/Vor) berücksichtigen
+  useEffect(() => {
+    const onPop = () => setRoute(parseRoute());
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  // Zugangsstatus prüfen (ist ein Code gesetzt? ist das gespeicherte Token gültig?)
+  useEffect(() => {
+    (async () => {
+      const c = await authCheck();
+      setAuthConfigured(!!c.configured);
+      setAuthValid(c.configured ? !!c.valid : true);
+      if (c.configured && !c.valid) setToken("");
+    })();
+  }, []);
+
+  // Pfad wechseln (interne Navigation)
+  const navigate = (path) => {
+    window.history.pushState({}, "", path);
+    setRoute(parseRoute());
+  };
+
+  // Aus der öffentlichen Seite heraus in die Prüfung wechseln (nur berechtigt)
+  const startInspectionForLadder = (ladder) => {
+    setAuthConfigured(true); setAuthValid(true);
+    setSelectedLadder(ladder);
+    setView(VIEWS.INSPECTION);
+    navigate("/");
+  };
 
   useEffect(() => {
     (async () => {
@@ -367,6 +447,32 @@ export default function App() {
     </div>
   );
 
+  // Öffentliche Leiter-Statusseite (QR-Code-Ziel) — für jedermann ohne Anmeldung
+  if (route.type === "public") {
+    const ladder = ladders.find(l => l.id === route.ladderId);
+    return (
+      <PublicLadderView
+        ladder={ladder}
+        inspection={ladder ? getLastInspection(ladder.id) : null}
+        company={settings.company}
+        authConfigured={authConfigured}
+        onStartInspection={startInspectionForLadder}
+        onOpenApp={() => navigate("/")}
+        showToast={showToast}
+      />
+    );
+  }
+
+  // Admin-App ist bei gesetztem Zugangscode geschützt
+  if (authConfigured && !authValid) {
+    return (
+      <LoginScreen
+        company={settings.company}
+        onSuccess={() => setAuthValid(true)}
+      />
+    );
+  }
+
   const navItems = [
     { v:VIEWS.DASHBOARD, icon:"◉", label:"Home"     },
     { v:VIEWS.LADDERS,   icon:"⊼", label:"Leitern"  },
@@ -415,8 +521,300 @@ export default function App() {
         {view===VIEWS.LADDERS    && <LaddersView ladders={ladders} saveLadders={saveLadders} locations={locations} inspections={inspections} getLastInspection={getLastInspection} isOverdue={isOverdue} showToast={showToast} settings={settings} />}
         {view===VIEWS.INSPECTION && <InspectionView ladders={activeLadders} selectedLadder={selectedLadder} setSelectedLadder={setSelectedLadder} inspectionState={inspectionState} setInspectionState={setInspectionState} inspections={inspections} saveInspections={saveInspections} settings={settings} showToast={showToast} setView={setView} />}
         {view===VIEWS.HISTORY    && <HistoryView inspections={inspections} ladders={ladders} saveInspections={saveInspections} showToast={showToast} settings={settings} highlightedId={highlightedInspId} clearHighlight={()=>setHighlightedInspId(null)} />}
-        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} />}
+        {view===VIEWS.SETTINGS   && <SettingsView settings={settings} saveSettings={saveSettings} locations={locations} saveLocations={saveLocations} ladders={ladders} saveLadders={saveLadders} showToast={showToast} authConfigured={authConfigured} setAuthConfigured={setAuthConfigured} setAuthValid={setAuthValid} />}
       </main>
+    </div>
+  );
+}
+
+// ─── Öffentliche Leiter-Statusseite (Ziel des QR-Codes) ───
+function PublicLadderView({ ladder, inspection, company, authConfigured, onStartInspection, onOpenApp, showToast }) {
+  const [pinOpen, setPinOpen] = useState(false);
+
+  // Status-Ampel bestimmen
+  let status; // { color, bg, label, sub }
+  const now = new Date();
+  if (!ladder) {
+    status = null;
+  } else if (!inspection) {
+    status = { color:"#856404", bg:"#fff3cd", icon:"⊙", label:"Noch nicht geprüft",
+               sub:"Für diese Leiter liegt noch keine Prüfung vor." };
+  } else {
+    const next = new Date(inspection.nextDate);
+    const pass = inspection.result === "bestanden";
+    const overdue = next < now;
+    if (!pass) {
+      status = { color:"#c1121f", bg:"#f8d7da", icon:"✗", label:"Nicht bestanden — gesperrt",
+                 sub:"Diese Leiter wurde bei der letzten Prüfung beanstandet und darf nicht verwendet werden." };
+    } else if (overdue) {
+      status = { color:"#c1121f", bg:"#f8d7da", icon:"⚠", label:"Prüfung überfällig",
+                 sub:"Die nächste Prüfung ist überfällig. Bitte nicht ohne erneute Prüfung verwenden." };
+    } else {
+      const days = Math.ceil((next - now) / 86400000);
+      const soon = days <= 30;
+      status = { color:"#2d6a4f", bg:"#d4edda", icon:"✓", label:"Geprüft & gültig",
+                 sub: soon ? `Gültig — nächste Prüfung in ${days} Tag${days===1?"":"en"}.` : "Diese Leiter ist geprüft und freigegeben." };
+    }
+  }
+
+  const pass = inspection?.result === "bestanden";
+  const typeObj = ladder ? LADDER_TYPES.find(t => t.id === ladder.type) : null;
+
+  return (
+    <div style={S.pubShell}>
+      {pinOpen && (
+        <PinModal
+          title="Prüfung starten"
+          subtitle="Nur für berechtigte Prüfer/innen. Bitte Zugangscode eingeben."
+          onClose={() => setPinOpen(false)}
+          onSuccess={() => { setPinOpen(false); onStartInspection(ladder); }}
+        />
+      )}
+
+      <header style={S.pubHeader}>
+        <div style={S.logo}>✚</div>
+        <div>
+          <div style={S.headerTitle}>Leiterprüfung</div>
+          <div style={S.headerSub}>{company || "Sicht- und Funktionsprüfung"}</div>
+        </div>
+      </header>
+
+      <main style={{ maxWidth: 560, margin: "0 auto", padding: "20px 16px" }}>
+        {!ladder ? (
+          <div style={S.emptyState}>
+            <div style={{ fontSize:52, marginBottom:12 }}>🔍</div>
+            <div style={{ fontWeight:700, fontSize:18, marginBottom:6 }}>Leiter nicht gefunden</div>
+            <div style={{ fontSize:14, color:"#888" }}>Der QR-Code verweist auf eine unbekannte oder gelöschte Leiter.</div>
+          </div>
+        ) : (
+          <>
+            <div style={{ ...S.pubStatusBanner, background: status.bg, color: status.color }}>
+              <div style={{ fontSize:40, lineHeight:1 }}>{status.icon}</div>
+              <div>
+                <div style={{ fontSize:19, fontWeight:800 }}>{status.label}</div>
+                <div style={{ fontSize:13, opacity:0.9, marginTop:3 }}>{status.sub}</div>
+              </div>
+            </div>
+
+            <div style={S.pubCard}>
+              <div style={{ display:"flex", gap:14, alignItems:"center" }}>
+                {ladder.photo && <img src={ladder.photo} alt="" style={{ width:74, height:74, objectFit:"cover", borderRadius:12, border:"1px solid #ddd", flexShrink:0 }} />}
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:DRK, letterSpacing:0.5 }}>{ladder.inventoryNr}</div>
+                  <div style={{ fontSize:18, fontWeight:700, margin:"2px 0" }}>{ladder.name}</div>
+                  <div style={{ fontSize:13, color:"#888" }}>
+                    {typeObj?.label}{ladder.material ? ` · ${ladder.material}` : ""}{ladder.location ? ` · ${ladder.location}` : ""}
+                  </div>
+                </div>
+              </div>
+              {ladder.retired && <div style={{ ...S.retiredBanner, marginTop:14, marginBottom:0 }}>⚠ Ausgemustert — nicht mehr im Prüfzyklus</div>}
+            </div>
+
+            <div style={S.pubCard}>
+              <h3 style={{ ...S.sectionTitle, marginTop:0 }}>Prüfstatus</h3>
+              <div style={S.pubRow}>
+                <span style={S.pubRowLabel}>Letzte Prüfung</span>
+                <span style={S.pubRowVal}>{inspection ? new Date(inspection.date).toLocaleDateString("de-DE") : "—"}</span>
+              </div>
+              <div style={S.pubRow}>
+                <span style={S.pubRowLabel}>Ergebnis</span>
+                <span style={{ ...S.pubRowVal, fontWeight:700, color: inspection ? (pass ? "#2d6a4f" : "#c1121f") : "#888" }}>
+                  {inspection ? (pass ? "✓ Bestanden" : "✗ Nicht bestanden") : "—"}
+                </span>
+              </div>
+              <div style={S.pubRow}>
+                <span style={S.pubRowLabel}>Nächste Prüfung</span>
+                <span style={S.pubRowVal}>{inspection ? new Date(inspection.nextDate).toLocaleDateString("de-DE") : "—"}</span>
+              </div>
+              {inspection?.inspector && (
+                <div style={S.pubRow}>
+                  <span style={S.pubRowLabel}>Geprüft von</span>
+                  <span style={S.pubRowVal}>{inspection.inspector}</span>
+                </div>
+              )}
+            </div>
+
+            <button style={{ ...S.primaryBtn }} onClick={() => { authConfigured ? setPinOpen(true) : onStartInspection(ladder); }}>
+              ☑ Prüfung starten
+            </button>
+            <p style={{ fontSize:12, color:"#aaa", textAlign:"center", marginTop:8 }}>
+              {authConfigured ? "Zugangscode erforderlich — nur für berechtigte Prüfer/innen." : "Startet die Leiterprüfung in der App."}
+            </p>
+            <button style={{ ...S.linkBtn, display:"block", margin:"10px auto 0" }} onClick={onOpenApp}>App öffnen →</button>
+          </>
+        )}
+
+        <div style={{ textAlign:"center", marginTop:28, fontSize:11, color:"#bbb", lineHeight:1.6 }}>
+          Prüfung gem. DGUV 208-016 · BetrSichV §14 · DIN EN 131
+        </div>
+      </main>
+    </div>
+  );
+}
+
+// ─── PIN-/Zugangscode-Dialog ───
+function PinModal({ title, subtitle, onClose, onSuccess }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const submit = async () => {
+    if (!code) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await authVerify(code);
+      if (r.token) setToken(r.token);
+      onSuccess();
+    } catch (e) {
+      setErr(e.message || "Zugangscode falsch");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={S.modalBox} onClick={e => e.stopPropagation()}>
+        <h3 style={{ margin:"0 0 6px", fontSize:18 }}>{title}</h3>
+        {subtitle && <p style={{ margin:"0 0 16px", fontSize:14, color:"#888", lineHeight:1.4 }}>{subtitle}</p>}
+        <input
+          style={S.input} type="password" inputMode="text" autoFocus value={code}
+          placeholder="Zugangscode" onChange={e => setCode(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && submit()}
+        />
+        {err && <div style={{ color:"#c1121f", fontSize:13, marginTop:10 }}>✗ {err}</div>}
+        <div style={{ display:"flex", gap:10, marginTop:18 }}>
+          <button style={{ ...S.secondaryBtn, flex:1 }} onClick={onClose}>Abbrechen</button>
+          <button style={{ ...S.primaryBtn, flex:2, marginTop:0, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+            {busy ? "Prüfe…" : "Anmelden"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Anmeldebildschirm (geschützte Admin-App) ───
+function LoginScreen({ company, onSuccess }) {
+  return (
+    <div style={S.loginShell}>
+      <div style={{ maxWidth:380, width:"100%" }}>
+        <div style={{ textAlign:"center", color:"#fff", marginBottom:24 }}>
+          <div style={{ fontSize:56, marginBottom:8 }}>✚</div>
+          <div style={{ fontSize:20, fontWeight:700 }}>Leiterprüfung</div>
+          <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || ""}</div>
+        </div>
+        <div style={{ background:"#fff", borderRadius:16, padding:24, boxShadow:"0 8px 32px rgba(0,0,0,0.25)" }}>
+          <PinModalInline onSuccess={onSuccess} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Inline-Variante des PIN-Felds (ohne Overlay) für den Anmeldebildschirm
+function PinModalInline({ onSuccess }) {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const submit = async () => {
+    if (!code) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await authVerify(code);
+      if (r.token) setToken(r.token);
+      onSuccess();
+    } catch (e) {
+      setErr(e.message || "Zugangscode falsch");
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div>
+      <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Anmelden</h3>
+      <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Bitte Zugangscode eingeben.</p>
+      <input
+        style={S.input} type="password" autoFocus value={code}
+        placeholder="Zugangscode" onChange={e => setCode(e.target.value)}
+        onKeyDown={e => e.key === "Enter" && submit()}
+      />
+      {err && <div style={{ color:"#c1121f", fontSize:13, marginTop:10 }}>✗ {err}</div>}
+      <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+        {busy ? "Prüfe…" : "Anmelden"}
+      </button>
+    </div>
+  );
+}
+
+// ─── QR-Code-Dialog (zum Aufkleben auf die reale Leiter) ───
+function QrCodeModal({ ladder, onClose }) {
+  const [dataUrl, setDataUrl] = useState("");
+  const url = ladderPublicUrl(ladder);
+
+  useEffect(() => {
+    QRCode.toDataURL(url, { width: 600, margin: 2, errorCorrectionLevel: "M" })
+      .then(setDataUrl).catch(() => setDataUrl(""));
+  }, [url]);
+
+  const printLabel = () => {
+    const w = window.open("", "_blank");
+    if (!w) return;
+    const typeLabel = LADDER_TYPES.find(t => t.id === ladder.type)?.label || "";
+    w.document.write(`<!DOCTYPE html><html lang="de"><head><meta charset="utf-8"><title>QR ${ladder.inventoryNr}</title>
+      <style>
+        @page { margin: 12mm; }
+        body { font-family: Arial, sans-serif; text-align:center; color:#1A1A1A; }
+        .wrap { border:2px solid #E30613; border-radius:12px; padding:18px; display:inline-block; max-width:320px; margin-top:20px; }
+        .org { color:#E30613; font-weight:bold; font-size:13px; letter-spacing:0.5px; }
+        img { width:240px; height:240px; }
+        .nr { font-size:22px; font-weight:bold; margin-top:8px; }
+        .name { font-size:15px; color:#444; }
+        .hint { font-size:11px; color:#888; margin-top:10px; }
+      </style></head><body>
+      <div class="wrap">
+        <div class="org">✚ LEITERPRÜFUNG</div>
+        <img src="${dataUrl}" alt="QR" />
+        <div class="nr">${ladder.inventoryNr}</div>
+        <div class="name">${ladder.name}${typeLabel ? " · " + typeLabel : ""}</div>
+        <div class="hint">Scannen für aktuellen Prüfstatus</div>
+      </div>
+      <script>window.onload=function(){setTimeout(function(){window.print();},250);};<\/script>
+      </body></html>`);
+    w.document.close();
+  };
+
+  const downloadPng = () => {
+    if (!dataUrl) return;
+    const a = document.createElement("a");
+    a.href = dataUrl;
+    a.download = `QR_${ladder.inventoryNr}.png`;
+    a.click();
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={S.modalBox} onClick={e => e.stopPropagation()}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:14 }}>
+          <h3 style={{ margin:0, fontSize:18 }}>QR-Code · {ladder.inventoryNr}</h3>
+          <button style={S.iconBtn} onClick={onClose}>✕</button>
+        </div>
+        <div style={{ textAlign:"center" }}>
+          {dataUrl
+            ? <img src={dataUrl} alt="QR-Code" style={{ width:220, height:220, border:"1px solid #eee", borderRadius:12 }} />
+            : <div style={{ width:220, height:220, margin:"0 auto", display:"flex", alignItems:"center", justifyContent:"center", color:"#aaa" }}>QR wird erstellt…</div>}
+        </div>
+        <div style={{ background:"#f5f5f5", borderRadius:8, padding:"10px 12px", fontSize:12, color:"#666", wordBreak:"break-all", margin:"14px 0" }}>
+          {url}
+        </div>
+        <p style={{ fontSize:13, color:"#888", lineHeight:1.5, margin:"0 0 16px" }}>
+          Diesen QR-Code auf die Leiter kleben. Jeder kann damit den aktuellen Prüfstatus abrufen; berechtigte Prüfer/innen starten darüber eine neue Prüfung.
+        </p>
+        <div style={{ display:"flex", gap:10 }}>
+          <button style={{ ...S.secondaryBtn, flex:1 }} onClick={downloadPng}>⬇ PNG</button>
+          <button style={{ ...S.primaryBtn, flex:1, marginTop:0 }} onClick={printLabel}>🖨 Drucken</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -571,6 +969,7 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
   const [form, setForm]             = useState(null);
   const [detailLadder, setDetailLadder] = useState(null);
   const [showRetired, setShowRetired]   = useState(false);
+  const [qrLadder, setQrLadder]     = useState(null);
 
   const activeLadders  = ladders.filter(l=>!l.retired);
   const retiredLadders = ladders.filter(l=>l.retired);
@@ -687,8 +1086,10 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
             </div>
           </div>
         </div>
+        {qrLadder && <QrCodeModal ladder={qrLadder} onClose={()=>setQrLadder(null)} />}
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:22}}>
           <button style={S.actionBtn} onClick={()=>{setForm({...lad});setDetailLadder(null);}}>✏ Bearbeiten</button>
+          <button style={{...S.actionBtn,color:DRK,borderColor:DRK}} onClick={()=>setQrLadder(lad)}>🔳 QR-Code</button>
           <button style={{...S.actionBtn,color:lad.retired?"#2d6a4f":"#e09f3e",borderColor:lad.retired?"#2d6a4f":"#e09f3e"}} onClick={()=>handleRetire(lad)}>
             {lad.retired?"✓ Reaktivieren":"⊘ Ausmustern"}
           </button>
@@ -1062,7 +1463,7 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
 }
 
 // ─── Einstellungen ───
-function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast }) {
+function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, authConfigured, setAuthConfigured, setAuthValid }) {
   const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})}});
   const [newLoc, setNewLoc]       = useState("");
   const [editingLoc, setEditingLoc] = useState(null);
@@ -1070,6 +1471,38 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [activeTab, setActiveTab] = useState("allgemein");
   const [smtpTest, setSmtpTest]   = useState(null);
   const [smtpTestMsg, setSmtpTestMsg] = useState("");
+  const [accCur, setAccCur]   = useState("");
+  const [accNew, setAccNew]   = useState("");
+  const [accNew2, setAccNew2] = useState("");
+  const [accBusy, setAccBusy] = useState(false);
+
+  const saveAccessCode = async () => {
+    if (accNew.length < 4) { showToast("Zugangscode muss mind. 4 Zeichen haben","error"); return; }
+    if (accNew !== accNew2) { showToast("Die beiden Codes stimmen nicht überein","error"); return; }
+    setAccBusy(true);
+    try {
+      const r = await authSet(accNew, accCur);
+      if (r.token) setToken(r.token);
+      setAuthConfigured(true); setAuthValid(true);
+      setAccCur(""); setAccNew(""); setAccNew2("");
+      showToast(authConfigured ? "Zugangscode geändert" : "Zugangscode gesetzt");
+    } catch (e) { showToast(e.message, "error"); }
+    setAccBusy(false);
+  };
+
+  const removeAccessCode = async () => {
+    if (!confirm("Zugangsschutz wirklich entfernen? Danach kann jeder die App nutzen.")) return;
+    setAccBusy(true);
+    try {
+      await authClear(accCur);
+      setToken(""); setAuthConfigured(false); setAuthValid(true);
+      setAccCur(""); setAccNew(""); setAccNew2("");
+      showToast("Zugangsschutz entfernt");
+    } catch (e) { showToast(e.message, "error"); }
+    setAccBusy(false);
+  };
+
+  const logout = () => { setToken(""); setAuthValid(false); };
 
   const save = () => { saveSettings(form); showToast("Einstellungen gespeichert"); };
 
@@ -1109,6 +1542,7 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
 
   const TABS=[
     {id:"allgemein",  label:"Allgemein",  icon:"⚙"},
+    {id:"zugang",     label:"Zugang",     icon:"🔒"},
     {id:"email",      label:"E-Mail",     icon:"✉"},
     {id:"standorte",  label:"Standorte",  icon:"📍"},
     {id:"rechtliches",label:"Recht",      icon:"⚖"},
@@ -1139,6 +1573,37 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
             </select>
           </div>
           <button style={S.primaryBtn} onClick={save}>💾 Speichern</button>
+        </div>
+      )}
+
+      {activeTab==="zugang"&&(
+        <div style={S.settingsSection}>
+          <h3 style={S.sectionTitle}>Zugangsschutz (QR-Code-Prüfung)</h3>
+          <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderRadius:10,marginBottom:16,
+            background:authConfigured?"#d4edda":"#fff3cd",color:authConfigured?"#2d6a4f":"#856404",fontSize:14,fontWeight:600}}>
+            {authConfigured ? "🔒 Aktiv — nur berechtigte Nutzer können Prüfungen starten" : "🔓 Inaktiv — die App ist für jeden ohne Code nutzbar"}
+          </div>
+          <p style={{fontSize:14,color:"#888",marginBottom:16,lineHeight:1.5}}>
+            Der Zugangscode schützt das Starten einer Leiterprüfung und das Speichern von Daten. Den QR-Code an der Leiter
+            kann weiterhin <strong>jede Person</strong> scannen, um den Prüfstatus zu sehen — nur das <strong>Starten einer Prüfung</strong> verlangt diesen Code.
+          </p>
+          {authConfigured && (
+            <Field label="Aktueller Zugangscode" value={accCur} onChange={setAccCur} placeholder="Aktueller Code" type="password" />
+          )}
+          <Field label={authConfigured?"Neuer Zugangscode":"Zugangscode festlegen"} value={accNew} onChange={setAccNew} placeholder="mind. 4 Zeichen" type="password" />
+          <Field label="Zugangscode wiederholen" value={accNew2} onChange={setAccNew2} placeholder="Wiederholen" type="password" />
+          <button style={{...S.primaryBtn,opacity:accBusy?0.6:1}} disabled={accBusy} onClick={saveAccessCode}>
+            {authConfigured ? "🔒 Code ändern" : "🔒 Zugangsschutz aktivieren"}
+          </button>
+          {authConfigured && (
+            <div style={{display:"flex",gap:10,marginTop:12}}>
+              <button style={{...S.secondaryBtn,flex:1}} onClick={logout}>Abmelden</button>
+              <button style={{...S.actionBtn,flex:1,color:"#c1121f",borderColor:"#c1121f"}} disabled={accBusy} onClick={removeAccessCode}>Schutz entfernen</button>
+            </div>
+          )}
+          <div style={{marginTop:14,padding:"12px 14px",background:"#f5f5f5",borderRadius:10,fontSize:13,color:"#888",lineHeight:1.7}}>
+            <strong style={{color:"#555"}}>Hinweis:</strong> Wird der Code vergessen, kann er serverseitig durch Löschen der Datei <code>auth.json</code> im Datenverzeichnis zurückgesetzt werden.
+          </div>
         </div>
       )}
 
@@ -1308,8 +1773,8 @@ const S = {
   listRow:      { padding:"12px 14px", background:"#fff", borderRadius:10, marginBottom:8, boxShadow:"0 1px 3px rgba(0,0,0,0.04)" },
   emptyState:   { textAlign:"center", padding:"48px 20px", color:"#888" },
 
-  settingsTabs:    { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:18 },
-  settingsTab:     { display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"12px 4px", background:"#fff", border:"1px solid #ddd", borderRadius:12, cursor:"pointer", color:"#888", minHeight:64 },
+  settingsTabs:    { display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:18 },
+  settingsTab:     { display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"12px 2px", background:"#fff", border:"1px solid #ddd", borderRadius:12, cursor:"pointer", color:"#888", minHeight:64 },
   settingsTabActive:{ background:DRK, color:"#fff", borderColor:DRK },
   settingsSection: { background:"#fff", borderRadius:14, padding:18, marginBottom:16, border:"1px solid #eee" },
 
@@ -1371,4 +1836,20 @@ const S = {
 
   legalBox:  { background:"#fff", borderRadius:14, padding:18, border:"1px solid #ddd" },
   legalItem: { padding:"8px 0", borderBottom:"1px solid #f0f0f0" },
+
+  // Öffentliche Statusseite (QR-Ziel)
+  pubShell:        { fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif", minHeight:"100vh", background:"#F2F2F2", color:"#1A1A1A" },
+  pubHeader:       { background:DRK, color:"#fff", padding:"16px 18px", display:"flex", alignItems:"center", gap:12, boxShadow:"0 2px 12px rgba(227,6,19,0.3)" },
+  pubStatusBanner: { display:"flex", alignItems:"center", gap:16, padding:"20px 18px", borderRadius:14, marginBottom:16 },
+  pubCard:         { background:"#fff", borderRadius:14, padding:18, marginBottom:16, boxShadow:"0 1px 4px rgba(0,0,0,0.06)" },
+  pubRow:          { display:"flex", justifyContent:"space-between", alignItems:"center", padding:"10px 0", borderTop:"1px solid #f0f0f0", gap:12 },
+  pubRowLabel:     { fontSize:13, color:"#888" },
+  pubRowVal:       { fontSize:15, fontWeight:600, textAlign:"right" },
+
+  // Anmeldung
+  loginShell: { minHeight:"100vh", background:DRK, display:"flex", alignItems:"center", justifyContent:"center", padding:20, fontFamily:"'DM Sans','Segoe UI',system-ui,sans-serif", color:"#1A1A1A" },
+
+  // Modal-Dialoge
+  modalOverlay: { position:"fixed", inset:0, background:"rgba(0,0,0,0.55)", zIndex:1000, display:"flex", alignItems:"center", justifyContent:"center", padding:16 },
+  modalBox:     { background:"#fff", borderRadius:16, padding:22, width:"100%", maxWidth:380, boxShadow:"0 12px 40px rgba(0,0,0,0.3)", maxHeight:"90vh", overflowY:"auto" },
 };
