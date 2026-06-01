@@ -37,6 +37,24 @@ Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssic
 - **Letzte Prüfungen** — Anklickbar, springt direkt zum Eintrag in der Prüfhistorie
 - **Nächste fällige Prüfungen** — Sortiert nach Datum mit Countdown
 
+### QR-Code & öffentliche Statusseite
+- **QR-Code je Leiter** — In der Leiter-Detailansicht generierbar, als PNG herunterladbar oder als Etikett druckbar (zum Aufkleben auf die reale Leiter)
+- **Öffentliche Statusseite** (`/l/<Leiter-ID>`) — Von **jedermann** ohne Anmeldung per Scan abrufbar; zeigt:
+  - Datum der letzten Prüfung
+  - Ergebnis (bestanden / nicht bestanden)
+  - Datum der nächsten fälligen Prüfung
+  - Ampel-Status (geprüft & gültig · bald fällig · überfällig · nicht bestanden · nie geprüft)
+- **Prüfung direkt per QR starten** — Über die Statusseite, jedoch **nur für berechtigte Nutzer** (Zugangscode erforderlich)
+- **Prüfung anfragen (für jedermann)** — Button auf der Statusseite: jede Person kann per Klick eine Prüfung anfragen. Es geht automatisch eine E-Mail an den/die Prüfer/in mit **Leiter-Stammdaten** und **Fälligkeitsdatum der nächsten Prüfung** (überfällig oder anstehend). So unterstützen auch Nicht-Prüfer die Leiterprüfung, wenn sie z. B. eine überfällige Leiter entdecken.
+  - Empfängeradresse einstellbar unter **Einstellungen → E-Mail → „E-Mail für Prüfungsanfragen"**
+  - Die E-Mail wird **serverseitig** aus den gespeicherten Stammdaten erzeugt (der öffentliche Client sendet nur die Leiter-ID) — kein offenes Mail-Relay; Spam-Schutz per Cooldown (10 Min./Leiter)
+
+### Zugangsschutz
+- **Optionaler Zugangscode (PIN)** — Unter **Einstellungen → Zugang** aktivierbar
+- **Serverseitige Prüfung** — Code wird nur als Hash gespeichert (scrypt); Tokens sind HMAC-signiert (30 Tage gültig)
+- **Schützt schreibende Aktionen** — Prüfung starten/speichern, Stammdaten ändern, E-Mail-Versand; **lesender Zugriff** (Statusseite) bleibt öffentlich
+- **Abwärtskompatibel** — Ohne gesetzten Code ist die App wie bisher frei nutzbar
+
 ---
 
 ## Unterstützte Leitertypen
@@ -70,13 +88,23 @@ Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssic
 Browser (React SPA)
     │
     ├── /          → nginx → statische Dateien (dist/)
+    ├── /l/<id>    → nginx → SPA → öffentliche Leiter-Statusseite (QR-Ziel)
     └── /api/      → nginx → Node.js Backend (Port 3001)
                                 │
-                                ├── GET  /data-all        Alle Datensätze laden
-                                ├── GET  /data/:key       Einzelner Datensatz
-                                ├── POST /data/:key       Datensatz speichern
-                                └── POST /send-email      E-Mail mit PDF-Anhang
+                                ├── GET  /data-all        Alle Datensätze laden (öffentlich, lesend)
+                                ├── GET  /data/:key       Einzelner Datensatz (öffentlich, lesend)
+                                ├── POST /data/:key       Datensatz speichern (Token nötig, falls Code gesetzt)
+                                ├── POST /send-email      E-Mail mit PDF-Anhang (Token nötig, falls Code gesetzt)
+                                ├── POST /request-inspection  Öffentliche Prüfungsanfrage per QR (kein Token, Cooldown)
+                                ├── GET  /auth/status      Ist ein Zugangscode gesetzt?
+                                ├── GET  /auth/check       Token gültig?
+                                ├── POST /auth/verify      Anmelden (Code → Token)
+                                ├── POST /auth/set         Code setzen/ändern
+                                └── POST /auth/clear        Code entfernen
 ```
+
+> Der Zugangscode wird ausschließlich als Hash (scrypt) im Datenverzeichnis (`auth.json`) gespeichert.
+> Bei vergessenem Code genügt das Löschen dieser Datei zum Zurücksetzen.
 
 ---
 
