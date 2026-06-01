@@ -559,11 +559,11 @@ export default function App() {
   if (!currentUser) return <LoginScreen company={settings.company} onSuccess={onLoggedIn} />;
 
   const navItems = [
-    { v:VIEWS.DASHBOARD, icon:"◉", label:"Home"     },
-    { v:VIEWS.LADDERS,   icon:"⊼", label:"Leitern"  },
-    { v:VIEWS.INSPECTION,icon:"☑", label:"Prüfung"  },
-    { v:VIEWS.HISTORY,   icon:"⏱", label:"Historie" },
-    { v:VIEWS.SETTINGS,  icon:"⚙", label:"Mehr"     },
+    { v:VIEWS.DASHBOARD, icon:"🏠", label:"Start"    },
+    { v:VIEWS.LADDERS,   icon:"🪜", label:"Leitern"  },
+    { v:VIEWS.INSPECTION,icon:"📋", label:"Prüfung"  },
+    { v:VIEWS.HISTORY,   icon:"🕓", label:"Historie" },
+    { v:VIEWS.SETTINGS,  icon:"⚙️", label:"Mehr"     },
   ];
 
   return (
@@ -573,12 +573,12 @@ export default function App() {
       <header style={S.header}>
         <div style={S.headerLeft}>
           <div style={S.logo}>⊼</div>
-          <div>
+          <div style={{minWidth:0}}>
             <div style={S.headerTitle}>Leiterprüfung</div>
             <div style={S.headerSub}>{settings.company || "DGUV 208-016 · BetrSichV · DIN EN 131"}</div>
           </div>
         </div>
-        <button style={S.menuBtn} onClick={()=>setMenuOpen(!menuOpen)}>{menuOpen?"✕":"☰"}</button>
+        <button style={S.menuBtn} aria-label="Menü" onClick={()=>setMenuOpen(!menuOpen)}>{menuOpen?"✕":"☰"}</button>
       </header>
 
       {menuOpen && <div style={S.overlay} onClick={()=>setMenuOpen(false)} />}
@@ -587,7 +587,7 @@ export default function App() {
           <button key={n.v} style={{...S.navItem,...(view===n.v?S.navItemActive:{})}}
             onClick={()=>{setView(n.v);setMenuOpen(false);}}>
             <span style={S.navIcon}>{n.icon}</span>
-            {n.label==="Home"?"Dashboard":n.label==="Leitern"?"Leiterdatenbank":n.label==="Prüfung"?"Neue Prüfung":n.label==="Historie"?"Prüfhistorie":"Einstellungen"}
+            {n.label==="Start"?"Dashboard":n.label==="Leitern"?"Leiterdatenbank":n.label==="Prüfung"?"Neue Prüfung":n.label==="Historie"?"Prüfhistorie":"Einstellungen"}
           </button>
         ))}
         <div style={{marginTop:"auto",padding:"16px 24px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
@@ -986,10 +986,10 @@ function DashboardView({ stats, ladders, inspections, locations, getLastInspecti
 
       <div style={S.quickActions}>
         {[
-          {icon:"☑",label:"Neue Prüfung",  action:()=>setView(VIEWS.INSPECTION)},
-          {icon:"+",label:"Leiter erfassen",action:()=>setView(VIEWS.LADDERS)},
-          {icon:"⏱",label:"Prüfhistorie",  action:()=>setView(VIEWS.HISTORY)},
-          {icon:"⚙",label:"Einstellungen", action:()=>setView(VIEWS.SETTINGS)},
+          {icon:"📋",label:"Neue Prüfung",  action:()=>setView(VIEWS.INSPECTION)},
+          {icon:"➕",label:"Leiter erfassen",action:()=>setView(VIEWS.LADDERS)},
+          {icon:"🕓",label:"Prüfhistorie",  action:()=>setView(VIEWS.HISTORY)},
+          {icon:"⚙️",label:"Einstellungen", action:()=>setView(VIEWS.SETTINGS)},
         ].map(b=>(
           <button key={b.label} style={S.quickActionBtn} onClick={b.action}>
             <span style={S.qaIcon}>{b.icon}</span>
@@ -1234,12 +1234,12 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
         </div>
         {qrLadder && <QrCodeModal ladder={qrLadder} onClose={()=>setQrLadder(null)} />}
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:22}}>
-          <button style={S.actionBtn} onClick={()=>{setForm({...lad});setDetailLadder(null);}}>✏ Bearbeiten</button>
+          <button style={S.actionBtn} onClick={()=>{setForm({...lad});setDetailLadder(null);}}>✏️ Bearbeiten</button>
           <button style={{...S.actionBtn,color:DRK,borderColor:DRK}} onClick={()=>setQrLadder(lad)}>🔳 QR-Code</button>
           <button style={{...S.actionBtn,color:lad.retired?"#2d6a4f":"#e09f3e",borderColor:lad.retired?"#2d6a4f":"#e09f3e"}} onClick={()=>handleRetire(lad)}>
-            {lad.retired?"✓ Reaktivieren":"⊘ Ausmustern"}
+            {lad.retired?"✅ Reaktivieren":"📦 Ausmustern"}
           </button>
-          <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#c1121f"}} onClick={()=>handleDelete(lad.id)}>🗑 Löschen</button>
+          <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#c1121f"}} onClick={()=>handleDelete(lad.id)}>🗑️ Löschen</button>
         </div>
         <h3 style={S.sectionTitle}>Prüfhistorie ({ladInsp.length})</h3>
         {ladInsp.length===0
@@ -1258,8 +1258,8 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
                   </div>
                   <div style={{display:"flex",gap:10,marginTop:12,flexWrap:"wrap"}}>
                     <button style={S.actionBtn} onClick={()=>downloadPDF(insp,lad)}>📄 PDF</button>
-                    {smtpOk&&<button style={S.actionBtn} onClick={()=>sendEmailAPI(insp,lad,settings.email,settings.smtp).then(()=>showToast("E-Mail gesendet")).catch(e=>showToast("Fehler: "+e.message,"error"))}>✉ E-Mail</button>}
-                    {settings.email&&!smtpOk&&<button style={S.actionBtn} onClick={()=>sendEmailMailto(insp,lad,settings.email)}>✉ E-Mail</button>}
+                    {smtpOk&&<button style={S.actionBtn} onClick={()=>sendEmailAPI(insp,lad,settings.email,settings.smtp).then(()=>showToast("E-Mail gesendet")).catch(e=>showToast("Fehler: "+e.message,"error"))}>✉️ E-Mail</button>}
+                    {settings.email&&!smtpOk&&<button style={S.actionBtn} onClick={()=>sendEmailMailto(insp,lad,settings.email)}>✉️ E-Mail</button>}
                   </div>
                 </div>
               );
@@ -1462,7 +1462,7 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
             <div style={{...S.emailStatusBox,
               background:emailStatus==="sent"?"#d4edda":emailStatus==="error"?"#f8d7da":emailStatus==="sending"?"#e8f4fd":"#f5f5f5",
               borderColor:emailStatus==="sent"?"#2d6a4f":emailStatus==="error"?"#c1121f":emailStatus==="sending"?"#1a6fa8":"#ddd"}}>
-              {emailStatus==="sending"&&<span style={{fontSize:14}}>✉ E-Mail wird gesendet an <strong>{settings.email}</strong>…</span>}
+              {emailStatus==="sending"&&<span style={{fontSize:14}}>✉️ E-Mail wird gesendet an <strong>{settings.email}</strong>…</span>}
               {emailStatus==="sent"&&<span style={{color:"#2d6a4f",fontSize:14}}>✓ E-Mail mit PDF gesendet an <strong>{settings.email}</strong></span>}
               {emailStatus==="error"&&(
                 <div>
@@ -1700,9 +1700,9 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
             </div>
             <div style={{display:"flex",gap:10,marginTop:12,flexWrap:"wrap"}}>
               <button style={S.actionBtn} onClick={()=>downloadPDF(insp,lad||{inventoryNr:"?",name:"Gelöscht",type:"stehleiter",manufacturer:"",material:"",year:"",location:""})}>📄 PDF</button>
-              {smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailAPI(insp,lad,settings.email,settings.smtp).then(()=>showToast("E-Mail gesendet")).catch(e=>showToast("Fehler: "+e.message,"error"))}>✉ E-Mail</button>}
-              {settings.email&&!smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailMailto(insp,lad,settings.email)}>✉ E-Mail</button>}
-              <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} onClick={()=>del(insp.id)}>🗑 Löschen</button>
+              {smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailAPI(insp,lad,settings.email,settings.smtp).then(()=>showToast("E-Mail gesendet")).catch(e=>showToast("Fehler: "+e.message,"error"))}>✉️ E-Mail</button>}
+              {settings.email&&!smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailMailto(insp,lad,settings.email)}>✉️ E-Mail</button>}
+              <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} onClick={()=>del(insp.id)}>🗑️ Löschen</button>
             </div>
           </div>
         );
@@ -1807,18 +1807,18 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   };
 
   const TABS=[
-    {id:"allgemein",  label:"Allgemein",  icon:"⚙"},
+    {id:"allgemein",  label:"Allgemein",  icon:"⚙️"},
     ...(isAdmin ? [{id:"pruefer", label:"Prüfer", icon:"👥"}] : []),
-    {id:"email",      label:"E-Mail",     icon:"✉"},
+    {id:"email",      label:"E-Mail",     icon:"✉️"},
     {id:"standorte",  label:"Standorte",  icon:"📍"},
-    {id:"rechtliches",label:"Recht",      icon:"⚖"},
+    {id:"rechtliches",label:"Recht",      icon:"⚖️"},
   ];
 
   return (
     <div style={S.page}>
       <h2 style={S.pageTitle}>Einstellungen</h2>
 
-      <div style={{...S.settingsTabs, gridTemplateColumns:`repeat(${TABS.length},1fr)`}}>
+      <div style={S.settingsTabs}>
         {TABS.map(t=>(
           <button key={t.id} style={{...S.settingsTab,...(activeTab===t.id?S.settingsTabActive:{})}} onClick={()=>setActiveTab(t.id)}>
             <span style={{fontSize:20,marginBottom:2}}>{t.icon}</span>
@@ -1958,8 +1958,8 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
                     {u.email&&<div style={{fontSize:13,color:"#888",overflow:"hidden",textOverflow:"ellipsis"}}>{u.email}</div>}
                   </div>
                   <div style={{display:"flex",gap:8,flexShrink:0}}>
-                    <button style={S.actionBtn} onClick={()=>setUserForm({id:u.id,name:u.name,email:u.email||"",role:u.role,active:u.active,password:""})}>✏</button>
-                    <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} onClick={()=>removeUser(u)}>🗑</button>
+                    <button style={S.actionBtn} title="Bearbeiten" aria-label="Bearbeiten" onClick={()=>setUserForm({id:u.id,name:u.name,email:u.email||"",role:u.role,active:u.active,password:""})}>✏️</button>
+                    <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} title="Löschen" aria-label="Löschen" onClick={()=>removeUser(u)}>🗑️</button>
                   </div>
                 </div>
               ))
@@ -2097,8 +2097,8 @@ const S = {
   header:      { background:DRK, color:"#fff", padding:"14px 18px", display:"flex", justifyContent:"space-between", alignItems:"center", position:"sticky", top:0, zIndex:100, boxShadow:"0 2px 12px rgba(227,6,19,0.3)" },
   headerLeft:  { display:"flex", alignItems:"center", gap:12 },
   logo:        { fontSize:24, width:42, height:42, display:"flex", alignItems:"center", justifyContent:"center", background:"rgba(255,255,255,0.2)", borderRadius:10, fontWeight:700, flexShrink:0 },
-  headerTitle: { fontSize:17, fontWeight:700, letterSpacing:0.3 },
-  headerSub:   { fontSize:10, opacity:0.8 },
+  headerTitle: { fontSize:17, fontWeight:700, letterSpacing:0.3, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" },
+  headerSub:   { fontSize:10, opacity:0.8, whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" },
   menuBtn:     { background:"none", border:"none", color:"#fff", cursor:"pointer", padding:10, fontSize:24, lineHeight:1, minWidth:44, minHeight:44 },
 
   overlay:      { position:"fixed", inset:0, background:"rgba(0,0,0,0.4)", zIndex:200 },
@@ -2108,21 +2108,21 @@ const S = {
   navIcon:      { fontSize:20, width:26, textAlign:"center" },
 
   tabBar:      { position:"fixed", bottom:0, left:0, right:0, background:"#fff", display:"flex", zIndex:100, boxShadow:"0 -2px 8px rgba(0,0,0,0.1)", borderTop:`2px solid ${DRK}`, paddingBottom:"env(safe-area-inset-bottom,0px)" },
-  tabItem:     { flex:1, display:"flex", flexDirection:"column", alignItems:"center", padding:"10px 0", background:"none", border:"none", color:"#999", cursor:"pointer", minHeight:58 },
-  tabItemActive:{ color:DRK },
+  tabItem:     { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, padding:"7px 0", margin:"6px 5px", background:"none", border:"none", color:"#777", cursor:"pointer", minHeight:50, borderRadius:14, fontWeight:600, transition:"background 0.15s,color 0.15s" },
+  tabItemActive:{ color:DRK, background:"#fdecec" },
 
   main:      { maxWidth:680, margin:"0 auto" },
   page:      { padding:"20px 16px" },
   pageTitle: { margin:"0 0 18px", fontSize:22, fontWeight:700, letterSpacing:0.2 },
 
-  toast: { position:"fixed", top:78, left:"50%", transform:"translateX(-50%)", color:"#fff", padding:"12px 28px", borderRadius:10, fontSize:14, fontWeight:600, zIndex:999, boxShadow:"0 4px 16px rgba(0,0,0,0.2)", whiteSpace:"nowrap" },
+  toast: { position:"fixed", top:78, left:"50%", transform:"translateX(-50%)", color:"#fff", padding:"12px 22px", borderRadius:10, fontSize:14, fontWeight:600, zIndex:999, boxShadow:"0 4px 16px rgba(0,0,0,0.2)", maxWidth:"90vw", textAlign:"center", lineHeight:1.4 },
 
   quickActions:  { display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:8, marginBottom:20 },
   quickActionBtn:{ display:"flex", flexDirection:"column", alignItems:"center", gap:6, padding:"16px 6px", background:"#fff", border:"1px solid #E8E8E8", borderRadius:14, cursor:"pointer", boxShadow:"0 1px 4px rgba(0,0,0,0.06)", minHeight:80 },
   qaIcon:        { fontSize:24, color:DRK },
   qaLabel:       { fontSize:11, fontWeight:600, color:"#555", textAlign:"center" },
   linkBtn:       { background:"none", border:"none", color:DRK, cursor:"pointer", fontSize:14, fontWeight:600, padding:"4px 0", minHeight:44 },
-  iconBtn:       { background:"none", border:"1px solid #ddd", borderRadius:8, color:"#666", cursor:"pointer", padding:"6px 12px", fontSize:16, minWidth:40, minHeight:40 },
+  iconBtn:       { background:"none", border:"1px solid #ddd", borderRadius:8, color:"#666", cursor:"pointer", padding:"6px 12px", fontSize:16, minWidth:44, minHeight:44, display:"flex", alignItems:"center", justifyContent:"center" },
   locTag:        { display:"inline-block", background:"#EBEBEB", color:"#666", fontSize:11, padding:"2px 8px", borderRadius:12, marginLeft:6 },
 
   statGrid:  { display:"grid", gridTemplateColumns:"1fr 1fr", gap:12, marginBottom:20 },
@@ -2137,8 +2137,8 @@ const S = {
   listRow:      { padding:"12px 14px", background:"#fff", borderRadius:10, marginBottom:8, boxShadow:"0 1px 3px rgba(0,0,0,0.04)" },
   emptyState:   { textAlign:"center", padding:"48px 20px", color:"#888" },
 
-  settingsTabs:    { display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:6, marginBottom:18 },
-  settingsTab:     { display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"12px 2px", background:"#fff", border:"1px solid #ddd", borderRadius:12, cursor:"pointer", color:"#888", minHeight:64 },
+  settingsTabs:    { display:"flex", gap:8, marginBottom:18, overflowX:"auto", paddingBottom:4, WebkitOverflowScrolling:"touch" },
+  settingsTab:     { flex:"0 0 auto", minWidth:74, display:"flex", flexDirection:"column", alignItems:"center", gap:4, padding:"11px 10px", background:"#fff", border:"1px solid #ddd", borderRadius:12, cursor:"pointer", color:"#888", minHeight:62 },
   settingsTabActive:{ background:DRK, color:"#fff", borderColor:DRK },
   settingsSection: { background:"#fff", borderRadius:14, padding:18, marginBottom:16, border:"1px solid #eee" },
 
