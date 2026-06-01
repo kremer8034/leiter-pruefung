@@ -92,15 +92,19 @@ function readBody(req) {
   return {};
 }
 
-// Routen-Segmente ermitteln. Bevorzugt den Catch-all-Parameter, fällt aber
-// robust auf req.url zurück (je nach Vercel-Routing ist req.query.path leer).
+// Routen-Segmente ermitteln. Die vercel.json-Rewrite reicht den Pfad als
+// Query-Parameter __p durch; req.url dient als robuster Fallback.
 function getSegments(req) {
-  const p = req.query && req.query.path;
+  const q = req.query || {};
+  const pp = Array.isArray(q.__p) ? q.__p.join("/") : q.__p;
+  if (typeof pp === "string" && pp) return pp.split("/").filter(Boolean);
+  const p = q.path;
   if (Array.isArray(p) && p.length) return p;
   if (typeof p === "string" && p) return p.split("/").filter(Boolean);
   const path = (req.url || "").split("?")[0];
   const parts = path.split("/").filter(Boolean);
   if (parts[0] === "api") parts.shift();
+  if (parts[0] === "index") parts.shift();
   return parts;
 }
 
