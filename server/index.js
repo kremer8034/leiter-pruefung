@@ -217,6 +217,105 @@ app.post("/send-email", requireAuth, async (req, res) => {
   }
 });
 
+// ─── Öffentliche Prüfungsanfrage (jede Person darf anfragen) ───
+// Der Client sendet NUR die ladderId. Empfänger, SMTP und Inhalt werden
+// serverseitig aus den gespeicherten Daten zusammengestellt — so kann der
+// offene Endpunkt nicht als beliebiges Mail-Relay missbraucht werden.
+const TYPE_LABELS = {
+  stehleiter: "Stehleiter", anlegeleiter: "Anlegeleiter", mehrzweckleiter: "Mehrzweckleiter",
+  trittleiter: "Trittleiter / Tritt", schiebeleiter: "Schiebeleiter", podestleiter: "Podestleiter",
+};
+const reqCooldown = new Map(); // ladderId -> timestamp (Spam-Schutz, in-memory)
+const REQUEST_COOLDOWN_MS = 1000 * 60 * 10; // 10 Minuten pro Leiter
+
+function fmtDate(d) {
+  try { return new Date(d).toLocaleDateString("de-DE"); } catch { return "—"; }
+}
+
+app.post("/request-inspection", async (req, res) => {
+  const { ladderId } = req.body || {};
+  if (!ladderId) return res.status(400).json({ error: "ladderId fehlt" });
+
+  const prev = reqCooldown.get(ladderId);
+  if (prev && Date.now() - prev < REQUEST_COOLDOWN_MS) {
+    return res.status(429).json({ error: "Für diese Leiter wurde gerade eben bereits eine Prüfung angefragt. Bitte später erneut versuchen." });
+  }
+
+  const settings = readStore("lp_pruefer") || {};
+  const smtp = settings.smtp || {};
+  const to = String(settings.requestEmail || settings.email || "").trim();
+  if (!to) return res.status(400).json({ error: "Es ist keine Empfänger-Adresse für Prüfungsanfragen hinterlegt." });
+  if (!smtp.host || !smtp.user || !smtp.pass) {
+    return res.status(400).json({ error: "Auf dem Server ist kein SMTP-Versand konfiguriert." });
+  }
+
+  const ladder = (readStore("lp_ladders") || []).find(l => l.id === ladderId);
+  if (!ladder) return res.status(404).json({ error: "Leiter nicht gefunden" });
+
+  const lastInsp = (readStore("lp_inspections") || [])
+    .filter(i => i.ladderId === ladderId)
+    .sort((a, b) => new Date(b.date) - new Date(a.date))[0] || null;
+  const nextDue = lastInsp ? new Date(lastInsp.nextDate) : null;
+  const overdue = nextDue ? nextDue.getTime() < Date.now() : false;
+
+  const statusLine = !lastInsp
+    ? `<span style="color:#856404;font-weight:bold;">Noch nie geprüft</span>`
+    : overdue
+      ? `<span style="color:#c1121f;font-weight:bold;">ÜBERFÄLLIG — fällig war ${fmtDate(nextDue)}</span>`
+      : `<span style="color:#2d6a4f;font-weight:bold;">fällig am ${fmtDate(nextDue)}</span>`;
+
+  const row = (label, val) =>
+    `<tr><td style="padding:6px 10px;font-weight:bold;background:#f5f5f5;border:1px solid #eee;">${label}</td><td style="padding:6px 10px;background:#fff;border:1px solid #eee;">${val || "—"}</td></tr>`;
+
+  const bodyHtml = `
+<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
+  <div style="background:#E30613;color:#fff;padding:20px;border-radius:6px 6px 0 0;">
+    <h2 style="margin:0;font-size:18px;">🔔 Prüfungsanfrage — Leiterprüfung</h2>
+  </div>
+  <div style="padding:20px;background:#f9f9f9;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;">
+    <p style="margin:0 0 14px;font-size:15px;">Eine Person hat über den QR-Code an der Leiter eine <strong>Prüfung angefragt</strong>.</p>
+    <p style="margin:0 0 16px;font-size:15px;">Nächste Prüfung: ${statusLine}</p>
+    <table style="width:100%;border-collapse:collapse;font-size:14px;">
+      ${row("Inventar-Nr.", ladder.inventoryNr)}
+      ${row("Bezeichnung", ladder.name)}
+      ${row("Typ", TYPE_LABELS[ladder.type] || ladder.type)}
+      ${row("Material", ladder.material)}
+      ${row("Hersteller", ladder.manufacturer)}
+      ${row("Baujahr", ladder.year)}
+      ${row("Standort", ladder.location)}
+      ${row("Max. Belastung", ladder.maxLoad ? ladder.maxLoad + " kg" : "")}
+      ${row("Länge / Höhe", ladder.length)}
+      ${row("Letzte Prüfung", lastInsp ? fmtDate(lastInsp.date) + (lastInsp.result === "bestanden" ? " (bestanden)" : " (nicht bestanden)") : "—")}
+      ${row("Nächste Prüfung fällig", lastInsp ? fmtDate(nextDue) : "—")}
+    </table>
+    <p style="margin:16px 0 0;font-size:12px;color:#888;">Automatisch ausgelöst durch einen QR-Code-Scan · ${new Date().toLocaleString("de-DE")}</p>
+  </div>
+</div>`;
+
+  const port   = parseInt(smtp.port) || 587;
+  const secure = smtp.secure === true || port === 465;
+
+  try {
+    const transporter = nodemailer.createTransport({
+      host: smtp.host, port, secure,
+      auth: { user: smtp.user, pass: smtp.pass },
+      tls: { rejectUnauthorized: false },
+    });
+    await transporter.sendMail({
+      from: `"DRK Leiterprüfung" <${smtp.user}>`,
+      to,
+      subject: `Prüfungsanfrage: ${ladder.inventoryNr} — ${ladder.name}`,
+      html: bodyHtml,
+    });
+    reqCooldown.set(ladderId, Date.now());
+    console.log(`[OK] Prüfungsanfrage ${ladder.inventoryNr} → ${to}`);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(`[ERR] Prüfungsanfrage: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, "0.0.0.0", () =>
   console.log(`Leiterprüfung Server läuft auf Port ${PORT} | Daten: ${DATA_DIR}`)

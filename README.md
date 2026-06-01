@@ -45,6 +45,9 @@ Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssic
   - Datum der nächsten fälligen Prüfung
   - Ampel-Status (geprüft & gültig · bald fällig · überfällig · nicht bestanden · nie geprüft)
 - **Prüfung direkt per QR starten** — Über die Statusseite, jedoch **nur für berechtigte Nutzer** (Zugangscode erforderlich)
+- **Prüfung anfragen (für jedermann)** — Button auf der Statusseite: jede Person kann per Klick eine Prüfung anfragen. Es geht automatisch eine E-Mail an den/die Prüfer/in mit **Leiter-Stammdaten** und **Fälligkeitsdatum der nächsten Prüfung** (überfällig oder anstehend). So unterstützen auch Nicht-Prüfer die Leiterprüfung, wenn sie z. B. eine überfällige Leiter entdecken.
+  - Empfängeradresse einstellbar unter **Einstellungen → E-Mail → „E-Mail für Prüfungsanfragen"**
+  - Die E-Mail wird **serverseitig** aus den gespeicherten Stammdaten erzeugt (der öffentliche Client sendet nur die Leiter-ID) — kein offenes Mail-Relay; Spam-Schutz per Cooldown (10 Min./Leiter)
 
 ### Zugangsschutz
 - **Optionaler Zugangscode (PIN)** — Unter **Einstellungen → Zugang** aktivierbar
@@ -92,6 +95,7 @@ Browser (React SPA)
                                 ├── GET  /data/:key       Einzelner Datensatz (öffentlich, lesend)
                                 ├── POST /data/:key       Datensatz speichern (Token nötig, falls Code gesetzt)
                                 ├── POST /send-email      E-Mail mit PDF-Anhang (Token nötig, falls Code gesetzt)
+                                ├── POST /request-inspection  Öffentliche Prüfungsanfrage per QR (kein Token, Cooldown)
                                 ├── GET  /auth/status      Ist ein Zugangscode gesetzt?
                                 ├── GET  /auth/check       Token gültig?
                                 ├── POST /auth/verify      Anmelden (Code → Token)

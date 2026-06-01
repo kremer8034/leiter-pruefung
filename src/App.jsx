@@ -334,6 +334,17 @@ async function sendEmailAPI(inspection, ladder, emailTo, smtp) {
   return true;
 }
 
+// Öffentliche Prüfungsanfrage (ohne Login) — Server baut die E-Mail aus den Stammdaten
+async function requestInspectionAPI(ladderId) {
+  const r = await fetch("/api/request-inspection", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ladderId }),
+  });
+  if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error || `HTTP ${r.status}`); }
+  return await r.json();
+}
+
 // mailto-Fallback
 function sendEmailMailto(inspection, ladder, emailTo) {
   const subject = encodeURIComponent(`Prüfprotokoll ${ladder.inventoryNr} – ${new Date(inspection.date).toLocaleDateString("de-DE")}`);
@@ -344,7 +355,7 @@ function sendEmailMailto(inspection, ladder, emailTo) {
 // ─── App ───
 const VIEWS = { DASHBOARD:0, LADDERS:1, INSPECTION:2, HISTORY:3, SETTINGS:4 };
 const EMPTY_SETTINGS = {
-  inspector: "", company: "BRK Bereitschaft Großheubach", interval: 12, email: "",
+  inspector: "", company: "BRK Bereitschaft Großheubach", interval: 12, email: "", requestEmail: "",
   smtp: { host:"", port:"587", user:"", pass:"", secure:false },
 };
 
@@ -456,6 +467,7 @@ export default function App() {
         inspection={ladder ? getLastInspection(ladder.id) : null}
         company={settings.company}
         authConfigured={authConfigured}
+        requestEnabled={!!(settings.requestEmail || settings.email)}
         onStartInspection={startInspectionForLadder}
         onOpenApp={() => navigate("/")}
         showToast={showToast}
@@ -528,8 +540,21 @@ export default function App() {
 }
 
 // ─── Öffentliche Leiter-Statusseite (Ziel des QR-Codes) ───
-function PublicLadderView({ ladder, inspection, company, authConfigured, onStartInspection, onOpenApp, showToast }) {
+function PublicLadderView({ ladder, inspection, company, authConfigured, requestEnabled, onStartInspection, onOpenApp, showToast }) {
   const [pinOpen, setPinOpen] = useState(false);
+  const [reqStatus, setReqStatus] = useState("idle"); // idle | sending | sent | error
+  const [reqMsg, setReqMsg]       = useState("");
+
+  const sendRequest = async () => {
+    setReqStatus("sending"); setReqMsg("");
+    try {
+      await requestInspectionAPI(ladder.id);
+      setReqStatus("sent");
+    } catch (e) {
+      setReqStatus("error");
+      setReqMsg(e.message || "Senden fehlgeschlagen");
+    }
+  };
 
   // Status-Ampel bestimmen
   let status; // { color, bg, label, sub }
@@ -634,12 +659,35 @@ function PublicLadderView({ ladder, inspection, company, authConfigured, onStart
               )}
             </div>
 
-            <button style={{ ...S.primaryBtn }} onClick={() => { authConfigured ? setPinOpen(true) : onStartInspection(ladder); }}>
-              ☑ Prüfung starten
-            </button>
-            <p style={{ fontSize:12, color:"#aaa", textAlign:"center", marginTop:8 }}>
-              {authConfigured ? "Zugangscode erforderlich — nur für berechtigte Prüfer/innen." : "Startet die Leiterprüfung in der App."}
-            </p>
+            {reqStatus === "sent" ? (
+              <div style={{ background:"#d4edda", color:"#155724", border:"1px solid #2d6a4f", borderRadius:12, padding:"16px 18px", textAlign:"center" }}>
+                <div style={{ fontSize:32, marginBottom:6 }}>✓</div>
+                <div style={{ fontWeight:700, fontSize:16 }}>Vielen Dank!</div>
+                <div style={{ fontSize:14, marginTop:4 }}>Die Prüfung wurde angefragt — der/die zuständige Prüfer/in wurde per E-Mail informiert.</div>
+              </div>
+            ) : (
+              <>
+                {requestEnabled && (
+                  <>
+                    <button style={{ ...S.primaryBtn, opacity: reqStatus==="sending" ? 0.6 : 1 }} disabled={reqStatus==="sending"} onClick={sendRequest}>
+                      {reqStatus==="sending" ? "Anfrage wird gesendet…" : "🔔 Prüfung anfragen"}
+                    </button>
+                    {reqStatus==="error" && <div style={{ color:"#c1121f", fontSize:13, marginTop:8, textAlign:"center" }}>✗ {reqMsg}</div>}
+                    <p style={{ fontSize:12, color:"#888", textAlign:"center", marginTop:8, lineHeight:1.5 }}>
+                      Sie helfen mit! Ihre Anfrage geht direkt an den/die zuständige/n Prüfer/in — z.&nbsp;B. wenn die nächste Prüfung schon fällig ist.
+                    </p>
+                  </>
+                )}
+                <button
+                  style={{ ...(requestEnabled ? S.secondaryBtn : S.primaryBtn), width:"100%", marginTop: requestEnabled ? 12 : 10 }}
+                  onClick={() => { authConfigured ? setPinOpen(true) : onStartInspection(ladder); }}>
+                  ☑ Prüfung starten (für Prüfer/innen)
+                </button>
+                <p style={{ fontSize:12, color:"#aaa", textAlign:"center", marginTop:8 }}>
+                  {authConfigured ? "Zugangscode erforderlich — nur für berechtigte Prüfer/innen." : "Startet die Leiterprüfung in der App."}
+                </p>
+              </>
+            )}
             <button style={{ ...S.linkBtn, display:"block", margin:"10px auto 0" }} onClick={onOpenApp}>App öffnen →</button>
           </>
         )}
@@ -1610,7 +1658,11 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
       {activeTab==="email"&&(
         <div style={S.settingsSection}>
           <h3 style={S.sectionTitle}>Empfänger</h3>
-          <Field label="E-Mail-Empfänger" value={form.email||""} onChange={v=>setForm(f=>({...f,email:v}))} placeholder="pruefung@example.de" type="email" />
+          <Field label="E-Mail-Empfänger (Prüfprotokolle)" value={form.email||""} onChange={v=>setForm(f=>({...f,email:v}))} placeholder="pruefung@example.de" type="email" />
+          <Field label="E-Mail für Prüfungsanfragen (QR-Code)" value={form.requestEmail||""} onChange={v=>setForm(f=>({...f,requestEmail:v}))} placeholder="leer = wie oben" type="email" />
+          <p style={{fontSize:13,color:"#888",marginTop:-6,marginBottom:8,lineHeight:1.5}}>
+            An diese Adresse geht die Benachrichtigung, wenn jemand über den QR-Code an der Leiter eine Prüfung anfragt. Bleibt das Feld leer, wird der Empfänger oben verwendet.
+          </p>
 
           <h3 style={{...S.sectionTitle,marginTop:20}}>SMTP-Server</h3>
           <p style={{fontSize:14,color:"#888",marginBottom:14,lineHeight:1.5}}>
