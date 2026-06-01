@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import QRCode from "qrcode";
+import JSZip from "jszip";
 
 // ─── Storage (Server + localStorage) ───
 const LADDERS_KEY     = "lp_ladders";
@@ -49,6 +50,7 @@ function createUser(payload)    { return apiJSON("/users", { method: "POST", bod
 function updateUser(id, patch)  { return apiJSON("/users/" + id, { method: "PATCH", body: patch }); }
 function deleteUser(id)         { return apiJSON("/users/" + id, { method: "DELETE" }); }
 async function listInspectors() { try { return (await apiJSON("/inspectors")).inspectors || []; } catch { return []; } }
+function triggerReminders()      { return apiJSON("/cron/reminders"); }
 
 function saveData(key, data) {
   try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
@@ -292,6 +294,61 @@ function downloadPDF(inspection, ladder) {
   doc.save(fn);
 }
 
+// ─── Export: CSV & ZIP ───
+const FALLBACK_LADDER = { inventoryNr:"?", name:"Gelöscht", type:"stehleiter", material:"", manufacturer:"", year:"", location:"", maxLoad:"", length:"" };
+
+function csvEscape(v) {
+  const s = v == null ? "" : String(v);
+  return /[";\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+function buildInspectionsCSV(insps, ladders) {
+  const headers = ["Prüf-ID","Prüfdatum","Nächste Prüfung","Ergebnis","Prüfer",
+    "Inventar-Nr.","Bezeichnung","Typ","Material","Hersteller","Baujahr","Standort","Max. Last (kg)","Länge/Höhe",
+    "Anzahl Mängel","Mängel","Allgemeine Bemerkungen"];
+  const lines = insps.map(insp => {
+    const lad = ladders.find(l => l.id === insp.ladderId) || FALLBACK_LADDER;
+    const qs = getQuestionsForType(lad.type);
+    const mangel = qs.filter(q => insp.answers?.[q.id] === "mangel")
+      .map(q => q.text + (insp.notes?.[q.id] ? ` (${insp.notes[q.id]})` : ""));
+    return [
+      insp.id,
+      new Date(insp.date).toLocaleDateString("de-DE"),
+      insp.nextDate ? new Date(insp.nextDate).toLocaleDateString("de-DE") : "",
+      insp.result === "bestanden" ? "Bestanden" : "Nicht bestanden",
+      insp.inspector || "",
+      lad.inventoryNr || "", lad.name || "",
+      LADDER_TYPES.find(t => t.id === lad.type)?.label || lad.type || "",
+      lad.material || "", lad.manufacturer || "", lad.year || "", lad.location || "",
+      lad.maxLoad || "", lad.length || "",
+      mangel.length, mangel.join(" | "),
+      insp.generalNotes || "",
+    ].map(csvEscape).join(";");
+  });
+  return "﻿" + [headers.map(csvEscape).join(";"), ...lines].join("\r\n"); // BOM für Excel
+}
+function triggerDownload(blob, filename) {
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+function downloadCSV(insps, ladders) {
+  triggerDownload(new Blob([buildInspectionsCSV(insps, ladders)], { type: "text/csv;charset=utf-8" }),
+    `Pruefungen_${new Date().toISOString().slice(0,10)}.csv`);
+}
+async function downloadPDFZip(insps, ladders) {
+  const zip = new JSZip();
+  for (const insp of insps) {
+    const lad = ladders.find(l => l.id === insp.ladderId) || FALLBACK_LADDER;
+    const safeNr = String(lad.inventoryNr || "x").replace(/[^\w.-]+/g, "_");
+    const fn = `Pruefprotokoll_${safeNr}_${new Date(insp.date).toISOString().slice(0,10)}_${insp.id}.pdf`;
+    zip.file(fn, buildPDF(insp, lad).output("arraybuffer"));
+  }
+  const blob = await zip.generateAsync({ type: "blob" });
+  triggerDownload(blob, `Pruefprotokolle_${new Date().toISOString().slice(0,10)}.zip`);
+}
+
 // Gibt Base64-String zurück (für E-Mail-Anhang)
 function getPDFBase64(inspection, ladder) {
   return buildPDF(inspection, ladder).output("datauristring").split(",")[1];
@@ -306,7 +363,7 @@ async function sendEmailAPI(inspection, ladder, emailTo, smtp) {
   const bodyHtml = `
 <div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;">
   <div style="background:#E30613;color:#fff;padding:20px;border-radius:6px 6px 0 0;">
-    <h2 style="margin:0;font-size:18px;">✚ DRK Leiterprüfung — Prüfprotokoll</h2>
+    <h2 style="margin:0;font-size:18px;">Leiterprüfung — Prüfprotokoll</h2>
   </div>
   <div style="padding:20px;background:#f9f9f9;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;">
     <p style="margin:0 0 16px;font-size:15px;">Das Prüfprotokoll für <strong>${ladder.inventoryNr} — ${ladder.name}</strong> ist als PDF-Anhang beigefügt.</p>
@@ -466,7 +523,7 @@ export default function App() {
 
   if (loading) return (
     <div style={S.loadScreen}>
-      <div style={{fontSize:64,marginBottom:16}}>✚</div>
+      <div style={{fontSize:64,marginBottom:16}}>⊼</div>
       <div style={{fontSize:16,letterSpacing:1}}>Leiterprüfung wird geladen…</div>
     </div>
   );
@@ -492,7 +549,7 @@ export default function App() {
   // Admin-App: Ersteinrichtung bzw. Anmeldung erforderlich
   if (!authReady) return (
     <div style={S.loadScreen}>
-      <div style={{fontSize:64,marginBottom:16}}>✚</div>
+      <div style={{fontSize:64,marginBottom:16}}>⊼</div>
       <div style={{fontSize:16,letterSpacing:1}}>Leiterprüfung wird geladen…</div>
     </div>
   );
@@ -513,10 +570,10 @@ export default function App() {
 
       <header style={S.header}>
         <div style={S.headerLeft}>
-          <div style={S.logo}>✚</div>
+          <div style={S.logo}>⊼</div>
           <div>
-            <div style={S.headerTitle}>DRK Leiterprüfung</div>
-            <div style={S.headerSub}>DGUV 208-016 · BetrSichV · DIN EN 131</div>
+            <div style={S.headerTitle}>Leiterprüfung</div>
+            <div style={S.headerSub}>{settings.company || "DGUV 208-016 · BetrSichV · DIN EN 131"}</div>
           </div>
         </div>
         <button style={S.menuBtn} onClick={()=>setMenuOpen(!menuOpen)}>{menuOpen?"✕":"☰"}</button>
@@ -619,7 +676,7 @@ function PublicLadderView({ ladder, inspection, company, loggedIn, onLoggedIn, r
       )}
 
       <header style={S.pubHeader}>
-        <div style={S.logo}>✚</div>
+        <div style={S.logo}>⊼</div>
         <div>
           <div style={S.headerTitle}>Leiterprüfung</div>
           <div style={S.headerSub}>{company || "Sicht- und Funktionsprüfung"}</div>
@@ -775,7 +832,7 @@ function LoginScreen({ company, onSuccess }) {
     <div style={S.loginShell}>
       <div style={{ maxWidth:380, width:"100%" }}>
         <div style={{ textAlign:"center", color:"#fff", marginBottom:24 }}>
-          <div style={{ fontSize:56, marginBottom:8 }}>✚</div>
+          <div style={{ fontSize:56, marginBottom:8 }}>⊼</div>
           <div style={{ fontSize:20, fontWeight:700 }}>Leiterprüfung</div>
           <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || ""}</div>
         </div>
@@ -811,7 +868,7 @@ function SetupScreen({ company, onSuccess }) {
     <div style={S.loginShell}>
       <div style={{ maxWidth:400, width:"100%" }}>
         <div style={{ textAlign:"center", color:"#fff", marginBottom:20 }}>
-          <div style={{ fontSize:56, marginBottom:8 }}>✚</div>
+          <div style={{ fontSize:56, marginBottom:8 }}>⊼</div>
           <div style={{ fontSize:20, fontWeight:700 }}>Ersteinrichtung</div>
           <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || "Leiterprüfung"}</div>
         </div>
@@ -860,7 +917,7 @@ function QrCodeModal({ ladder, onClose }) {
         .hint { font-size:11px; color:#888; margin-top:10px; }
       </style></head><body>
       <div class="wrap">
-        <div class="org">✚ LEITERPRÜFUNG</div>
+        <div class="org">⊼ LEITERPRÜFUNG</div>
         <img src="${dataUrl}" alt="QR" />
         <div class="nr">${ladder.inventoryNr}</div>
         <div class="name">${ladder.name}${typeLabel ? " · " + typeLabel : ""}</div>
@@ -1040,7 +1097,7 @@ function DashboardView({ stats, ladders, inspections, locations, getLastInspecti
 
       {ladders.length===0 && (
         <div style={S.emptyState}>
-          <div style={{fontSize:52,marginBottom:12}}>✚</div>
+          <div style={{fontSize:52,marginBottom:12}}>⊼</div>
           <div style={{fontWeight:700,fontSize:17,marginBottom:6}}>Noch keine Leitern erfasst</div>
           <div style={{fontSize:14,color:"#888",marginBottom:20}}>Starte mit der Leiterdatenbank.</div>
           <button style={{...S.primaryBtn,maxWidth:280,margin:"0 auto"}} onClick={()=>setView(VIEWS.LADDERS)}>+ Erste Leiter erfassen</button>
@@ -1519,6 +1576,89 @@ function SignaturePad({ onConfirm }) {
 }
 
 // ─── Prüfhistorie ───
+// ─── Export-/Download-Sektion (Historie) ───
+function ExportSection({ inspections, ladders, showToast }) {
+  const [open, setOpen] = useState(false);
+  const year = new Date().getFullYear();
+  const [from, setFrom] = useState(`${year}-01-01`);
+  const [to, setTo]     = useState(new Date().toISOString().slice(0,10));
+  const [zipBusy, setZipBusy] = useState(false);
+
+  const usedLadders = ladders
+    .filter(l => inspections.some(i => i.ladderId === l.id))
+    .sort((a,b) => String(a.inventoryNr||"").localeCompare(String(b.inventoryNr||"")));
+  const [sel, setSel] = useState(() => Object.fromEntries(usedLadders.map(l => [l.id, true])));
+
+  const allOn = usedLadders.length > 0 && usedLadders.every(l => sel[l.id]);
+  const toggleAll = () => { const v = !allOn; setSel(Object.fromEntries(usedLadders.map(l => [l.id, v]))); };
+
+  const filtered = inspections.filter(i => {
+    const d = (i.date || "").slice(0,10);
+    if (from && d < from) return false;
+    if (to && d > to) return false;
+    return !!sel[i.ladderId];
+  }).sort((a,b) => new Date(a.date) - new Date(b.date));
+
+  const doCSV = () => {
+    if (!filtered.length) { showToast("Keine Prüfungen im gewählten Bereich","error"); return; }
+    downloadCSV(filtered, ladders);
+  };
+  const doZip = async () => {
+    if (!filtered.length) { showToast("Keine Prüfungen im gewählten Bereich","error"); return; }
+    setZipBusy(true);
+    try { await downloadPDFZip(filtered, ladders); }
+    catch (e) { showToast("ZIP fehlgeschlagen: " + e.message, "error"); }
+    setZipBusy(false);
+  };
+
+  return (
+    <div style={{...S.settingsSection, padding:0, overflow:"hidden", marginBottom:18}}>
+      <button onClick={()=>setOpen(o=>!o)} style={{width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",background:"none",border:"none",padding:"16px 18px",cursor:"pointer",fontSize:15,fontWeight:700,color:"#1A1A1A"}}>
+        <span>⬇ Export / Download</span><span style={{color:"#888",fontSize:13}}>{open?"▲":"▼"}</span>
+      </button>
+      {open && (
+        <div style={{padding:"0 18px 18px"}}>
+          <div style={S.formGrid}>
+            <div style={S.fieldWrap}>
+              <label style={S.fieldLabel}>Von</label>
+              <input style={S.input} type="date" value={from} onChange={e=>setFrom(e.target.value)} />
+            </div>
+            <div style={S.fieldWrap}>
+              <label style={S.fieldLabel}>Bis</label>
+              <input style={S.input} type="date" value={to} onChange={e=>setTo(e.target.value)} />
+            </div>
+          </div>
+          <div style={S.fieldWrap}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <label style={{...S.fieldLabel,marginBottom:0}}>Leitern</label>
+              {usedLadders.length>0 && <button style={S.linkBtn} onClick={toggleAll}>{allOn?"Alle abwählen":"Alle auswählen"}</button>}
+            </div>
+            {usedLadders.length===0
+              ? <div style={{fontSize:14,color:"#888"}}>Keine geprüften Leitern vorhanden.</div>
+              : <div style={{maxHeight:200,overflowY:"auto",border:"1px solid #eee",borderRadius:10,padding:"4px 12px"}}>
+                  {usedLadders.map(l=>(
+                    <label key={l.id} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 0",cursor:"pointer",fontSize:14}}>
+                      <input type="checkbox" checked={!!sel[l.id]} onChange={e=>setSel(s=>({...s,[l.id]:e.target.checked}))} style={{accentColor:DRK,width:18,height:18,flexShrink:0}} />
+                      <span><strong>{l.inventoryNr}</strong> — {l.name}{l.location?` · ${l.location}`:""}</span>
+                    </label>
+                  ))}
+                </div>
+            }
+          </div>
+          <div style={{fontSize:13,color:"#666",margin:"4px 0 14px"}}>{filtered.length} Prüfung(en) im Auswahlbereich</div>
+          <div style={{display:"flex",gap:10,flexWrap:"wrap"}}>
+            <button style={{...S.primaryBtn,flex:1,marginTop:0,minWidth:150}} onClick={doCSV}>⬇ CSV (Metadaten)</button>
+            <button style={{...S.secondaryBtn,flex:1,minWidth:150,opacity:zipBusy?0.6:1}} disabled={zipBusy} onClick={doZip}>{zipBusy?"ZIP wird erstellt…":"🗇 Alle PDFs (ZIP)"}</button>
+          </div>
+          <p style={{fontSize:12,color:"#aaa",marginTop:10,lineHeight:1.5}}>
+            CSV enthält alle Metadaten der gewählten Prüfungen; ZIP bündelt die zugehörigen Prüfprotokoll-PDFs.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function HistoryView({ inspections, ladders, saveInspections, showToast, settings, highlightedId, clearHighlight }) {
   const sorted = [...inspections].sort((a,b)=>new Date(b.date)-new Date(a.date));
   const highlightRef = useRef(null);
@@ -1537,6 +1677,7 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
   return (
     <div style={S.page}>
       <h2 style={S.pageTitle}>Prüfhistorie ({inspections.length})</h2>
+      <ExportSection inspections={inspections} ladders={ladders} showToast={showToast} />
       {sorted.length===0&&<div style={S.emptyState}><div style={{fontSize:40}}>📋</div><div style={{fontSize:15}}>Noch keine Prüfungen.</div></div>}
       {sorted.map(insp=>{
         const lad=ladders.find(l=>l.id===insp.ladderId);
@@ -1582,6 +1723,18 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [users, setUsers]       = useState(null);
   const [userForm, setUserForm] = useState(null); // null | {id?, name, email, role, active, password}
   const [userBusy, setUserBusy] = useState(false);
+  const [remBusy, setRemBusy]   = useState(false);
+
+  const sendReminders = async () => {
+    if (!confirm("Jetzt Erinnerungs-E-Mails für alle fälligen Leitern senden?")) return;
+    setRemBusy(true);
+    try {
+      const r = await triggerReminders();
+      showToast(r.sent > 0 ? `${r.sent} Erinnerung(en) versendet · ${r.due} fällige Leiter`
+        : (r.due === 0 ? "Keine fälligen Leitern" : (r.error || "Keine Empfänger/SMTP")), r.sent > 0 || r.due === 0 ? "success" : "error");
+    } catch (e) { showToast(e.message, "error"); }
+    setRemBusy(false);
+  };
 
   const loadUsers = async () => { try { setUsers((await listUsers()).users || []); } catch (e) { showToast(e.message, "error"); } };
   useEffect(() => { if (isAdmin && activeTab === "pruefer" && users === null) loadUsers(); }, [isAdmin, activeTab]); // eslint-disable-line
@@ -1691,6 +1844,17 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
             </div>
             <button style={S.primaryBtn} onClick={save}>💾 Speichern</button>
           </div>
+          {isAdmin && (
+            <div style={S.settingsSection}>
+              <h3 style={S.sectionTitle}>Erinnerungen</h3>
+              <p style={{fontSize:13,color:"#888",marginBottom:12,lineHeight:1.5}}>
+                Prüfer werden automatisch täglich per E-Mail erinnert, sobald das Prüfintervall einer Leiter abgelaufen ist — an die hinterlegte Adresse des Prüfers, der die letzte Prüfung durchgeführt hat (Fallback: alle Admins). Die Mail enthält zusätzlich alle in diesem Kalenderjahr noch nicht geprüften Leitern.
+              </p>
+              <button style={{...S.secondaryBtn,width:"100%",opacity:remBusy?0.6:1}} disabled={remBusy} onClick={sendReminders}>
+                {remBusy ? "Wird gesendet…" : "🔔 Fällige Erinnerungen jetzt senden"}
+              </button>
+            </div>
+          )}
         </>
       )}
 

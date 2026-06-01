@@ -143,6 +143,117 @@ function getSegments(req) {
   return parts;
 }
 
+// ─── Erinnerungen: fällige Leitern an den letzten Prüfer melden ───
+function rrow(cells) {
+  return `<tr>${cells.map(c => `<td style="padding:6px 10px;border:1px solid #eee;font-size:13px;">${c == null || c === "" ? "—" : c}</td>`).join("")}</tr>`;
+}
+function rhead(cells) {
+  return `<tr>${cells.map(c => `<th style="padding:6px 10px;border:1px solid #eee;background:#f5f5f5;text-align:left;font-size:12px;">${c}</th>`).join("")}</tr>`;
+}
+
+async function runReminders() {
+  const settings = (await readStore("lp_pruefer")) || {};
+  const smtp = settings.smtp || {};
+  if (!smtp.host || !smtp.user || !smtp.pass) return { ok: false, error: "Kein SMTP konfiguriert", sent: 0, due: 0 };
+
+  const ladders = (await readStore("lp_ladders")) || [];
+  const inspections = (await readStore("lp_inspections")) || [];
+  const reminded = (await readStore("lp_reminders")) || {}; // { ladderId: nextDateISO }
+
+  const { data: userRows } = await supabase.from("app_users").select("id,email,role,active");
+  const usersById = {}; (userRows || []).forEach(u => { usersById[u.id] = u; });
+  const adminEmails = (userRows || []).filter(u => u.role === "admin" && u.active && u.email).map(u => u.email);
+
+  const today = new Date();
+  const todayStr = today.toISOString().slice(0, 10);
+  const year = today.getFullYear();
+
+  // Letzte Prüfung je Leiter
+  const lastByLadder = {};
+  for (const insp of inspections) {
+    const cur = lastByLadder[insp.ladderId];
+    if (!cur || new Date(insp.date) > new Date(cur.date)) lastByLadder[insp.ladderId] = insp;
+  }
+
+  // Übersicht: aktive Leitern ohne Prüfung im aktuellen Kalenderjahr
+  const overview = ladders.filter(l => !l.retired)
+    .filter(l => !inspections.some(i => i.ladderId === l.id && new Date(i.date).getFullYear() === year))
+    .map(l => ({ ladder: l, lastDate: lastByLadder[l.id]?.date || null }))
+    .sort((a, b) => String(a.ladder.inventoryNr || "").localeCompare(String(b.ladder.inventoryNr || "")));
+
+  // Fällige Leitern (Intervall abgelaufen) — pro Zyklus nur einmal erinnern
+  const due = [];
+  for (const l of ladders) {
+    if (l.retired) continue;
+    const last = lastByLadder[l.id];
+    if (!last || !last.nextDate) continue;
+    if (String(last.nextDate).slice(0, 10) > todayStr) continue;     // noch nicht fällig
+    if (reminded[l.id] === last.nextDate) continue;                  // bereits erinnert
+    due.push({ ladder: l, last });
+  }
+  if (due.length === 0) return { ok: true, sent: 0, due: 0 };
+
+  // Empfänger ermitteln & gruppieren
+  const groups = new Map(); // email -> [{ladder,last}]
+  for (const d of due) {
+    const u = usersById[d.last.inspectorId];
+    const recipients = (u && u.email) ? [u.email] : adminEmails;
+    if (!recipients || recipients.length === 0) continue;
+    for (const email of recipients) {
+      if (!groups.has(email)) groups.set(email, []);
+      groups.get(email).push(d);
+    }
+  }
+
+  const overviewTable = overview.length === 0
+    ? `<p style="font-size:14px;color:#2d6a4f;">Alle aktiven Leitern wurden ${year} bereits geprüft. 👍</p>`
+    : `<table style="width:100%;border-collapse:collapse;margin-top:6px;">
+        ${rhead(["Inventar-Nr.", "Bezeichnung", "Standort", "Letzte Prüfung"])}
+        ${overview.map(o => rrow([`<strong>${o.ladder.inventoryNr || "—"}</strong>`, o.ladder.name || "—", o.ladder.location || "—", o.lastDate ? fmtDate(o.lastDate) : "nie"])).join("")}
+      </table>`;
+
+  const port = parseInt(smtp.port) || 587;
+  const secure = smtp.secure === true || port === 465;
+  const transporter = nodemailer.createTransport({ host: smtp.host, port, secure, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false } });
+
+  let sent = 0;
+  for (const [email, items] of groups) {
+    const dueTable = `<table style="width:100%;border-collapse:collapse;margin-top:6px;">
+        ${rhead(["Inventar-Nr.", "Bezeichnung", "Standort", "Letzte Prüfung", "Fällig seit/am"])}
+        ${items.map(({ ladder, last }) => rrow([`<strong>${ladder.inventoryNr || "—"}</strong>`, ladder.name || "—", ladder.location || "—", fmtDate(last.date), fmtDate(last.nextDate)])).join("")}
+      </table>`;
+    const html = `
+<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;">
+  <div style="background:#E30613;color:#fff;padding:20px;border-radius:6px 6px 0 0;">
+    <h2 style="margin:0;font-size:18px;">⏰ Leiterprüfung fällig</h2>
+  </div>
+  <div style="padding:20px;background:#f9f9f9;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;">
+    <p style="margin:0 0 12px;font-size:15px;">Bei folgenden Leitern ist das Prüfintervall abgelaufen — bitte erneut prüfen:</p>
+    ${dueTable}
+    <h3 style="font-size:15px;margin:22px 0 6px;">Im Kalenderjahr ${year} noch nicht geprüft</h3>
+    <p style="margin:0 0 6px;font-size:13px;color:#666;">Diese Leitern könnten gleich mitgeprüft werden:</p>
+    ${overviewTable}
+    <p style="margin:18px 0 0;font-size:12px;color:#888;">Automatische Erinnerung der Leiterprüfung · ${today.toLocaleDateString("de-DE")}</p>
+  </div>
+</div>`;
+    await transporter.sendMail({
+      from: `"Leiterprüfung" <${smtp.user}>`, to: email,
+      subject: `Leiterprüfung fällig: ${items.length} Leiter${items.length > 1 ? "n" : ""}`, html,
+    });
+    sent++;
+  }
+
+  // Erinnerte Zyklen markieren (nur die mit Empfänger)
+  for (const d of due) {
+    const u = usersById[d.last.inspectorId];
+    const recipients = (u && u.email) ? [u.email] : adminEmails;
+    if (recipients && recipients.length) reminded[d.ladder.id] = d.last.nextDate;
+  }
+  await writeStore("lp_reminders", reminded);
+
+  return { ok: true, sent, due: due.length };
+}
+
 export default async function handler(req, res) {
   if (!supabase) {
     return res.status(500).json({ error: "Server nicht konfiguriert: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY fehlen." });
@@ -153,6 +264,16 @@ export default async function handler(req, res) {
 
   try {
     if (route === "health") return res.json({ ok: true });
+
+    // ── Erinnerungen: per Vercel-Cron (CRON_SECRET) oder manuell durch Admin ──
+    if (route === "cron/reminders") {
+      const secretEnv = process.env.CRON_SECRET;
+      const okCron = !!secretEnv && bearer(req) === secretEnv;
+      let okAdmin = false;
+      if (!okCron) { const me = await currentUser(req); okAdmin = !!(me && me.role === "admin"); }
+      if (!okCron && !okAdmin) return res.status(401).json({ error: "Nicht autorisiert" });
+      return res.json(await runReminders());
+    }
 
     // ── Alle Datensätze ──
     if (route === "data-all" && method === "GET") {
@@ -289,7 +410,7 @@ export default async function handler(req, res) {
       const transporter = nodemailer.createTransport({
         host: smtp.host, port, secure, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false },
       });
-      const mail = { from: `"DRK Leiterprüfung" <${smtp.user}>`, to, subject, html: bodyHtml || "<p>Prüfprotokoll im Anhang.</p>", attachments: [] };
+      const mail = { from: `"Leiterprüfung" <${smtp.user}>`, to, subject, html: bodyHtml || "<p>Prüfprotokoll im Anhang.</p>", attachments: [] };
       if (pdfBase64) mail.attachments.push({ filename: pdfFilename || "Pruefprotokoll.pdf", content: Buffer.from(pdfBase64, "base64"), contentType: "application/pdf" });
       await transporter.sendMail(mail);
       return res.json({ success: true });
@@ -354,7 +475,7 @@ export default async function handler(req, res) {
         host: smtp.host, port, secure, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false },
       });
       await transporter.sendMail({
-        from: `"DRK Leiterprüfung" <${smtp.user}>`, to,
+        from: `"Leiterprüfung" <${smtp.user}>`, to,
         subject: `Prüfungsanfrage: ${ladder.inventoryNr} — ${ladder.name}`, html: bodyHtml,
       });
       reqCooldown.set(ladderId, Date.now());
