@@ -44,16 +44,18 @@ Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssic
   - Ergebnis (bestanden / nicht bestanden)
   - Datum der nächsten fälligen Prüfung
   - Ampel-Status (geprüft & gültig · bald fällig · überfällig · nicht bestanden · nie geprüft)
-- **Prüfung direkt per QR starten** — Über die Statusseite, jedoch **nur für berechtigte Nutzer** (Zugangscode erforderlich)
+- **Prüfung direkt per QR starten** — Über die Statusseite, jedoch **nur für angemeldete Prüfer** (Login erforderlich)
 - **Prüfung anfragen (für jedermann)** — Button auf der Statusseite: jede Person kann per Klick eine Prüfung anfragen. Es geht automatisch eine E-Mail an den/die Prüfer/in mit **Leiter-Stammdaten** und **Fälligkeitsdatum der nächsten Prüfung** (überfällig oder anstehend). So unterstützen auch Nicht-Prüfer die Leiterprüfung, wenn sie z. B. eine überfällige Leiter entdecken.
   - Empfängeradresse einstellbar unter **Einstellungen → E-Mail → „E-Mail für Prüfungsanfragen"**
   - Die E-Mail wird **serverseitig** aus den gespeicherten Stammdaten erzeugt (der öffentliche Client sendet nur die Leiter-ID) — kein offenes Mail-Relay; Spam-Schutz per Cooldown (10 Min./Leiter)
 
-### Zugangsschutz
-- **Optionaler Zugangscode (PIN)** — Unter **Einstellungen → Zugang** aktivierbar
-- **Serverseitige Prüfung** — Code wird nur als Hash gespeichert (scrypt); Tokens sind HMAC-signiert (30 Tage gültig)
-- **Schützt schreibende Aktionen** — Prüfung starten/speichern, Stammdaten ändern, E-Mail-Versand; **lesender Zugriff** (Statusseite) bleibt öffentlich
-- **Abwärtskompatibel** — Ohne gesetzten Code ist die App wie bisher frei nutzbar
+### Benutzerverwaltung & Zugangsschutz
+- **Benutzerkonten pro Prüfer** — Jeder Prüfer meldet sich mit eigener E-Mail (oder Name) und Passwort an
+- **Ersteinrichtung** — Existiert noch kein Konto, legt die App beim ersten Aufruf den ersten **Administrator** an
+- **Prüferverwaltung (Admin)** — Unter **Einstellungen → Prüfer**: anlegen, bearbeiten, aktiv/inaktiv schalten, löschen, Passwort zurücksetzen; Rollen Admin/Prüfer
+- **Pflicht-Prüferauswahl** — In jeder Prüfung wird ausgewählt, **wer** sie durchgeführt hat (vorbelegt mit dem angemeldeten Nutzer); der Name erscheint im Prüfprotokoll
+- **Serverseitige Sicherheit** — Passwörter nur als Hash gespeichert (scrypt); Tokens HMAC-signiert mit Benutzer-ID (30 Tage gültig)
+- **Schützt schreibende Aktionen** — Prüfung starten/speichern, Stammdaten ändern, E-Mail-Versand erfordern Login; **lesender Zugriff** (QR-Statusseite) bleibt öffentlich
 
 ---
 
@@ -93,18 +95,20 @@ Browser (React SPA)
                                 │
                                 ├── GET  /data-all        Alle Datensätze laden (öffentlich, lesend)
                                 ├── GET  /data/:key       Einzelner Datensatz (öffentlich, lesend)
-                                ├── POST /data/:key       Datensatz speichern (Token nötig, falls Code gesetzt)
-                                ├── POST /send-email      E-Mail mit PDF-Anhang (Token nötig, falls Code gesetzt)
-                                ├── POST /request-inspection  Öffentliche Prüfungsanfrage per QR (kein Token, Cooldown)
-                                ├── GET  /auth/status      Ist ein Zugangscode gesetzt?
-                                ├── GET  /auth/check       Token gültig?
-                                ├── POST /auth/verify      Anmelden (Code → Token)
-                                ├── POST /auth/set         Code setzen/ändern
-                                └── POST /auth/clear        Code entfernen
+                                ├── POST /data/:key       Datensatz speichern (Login nötig)
+                                ├── POST /send-email      E-Mail mit PDF-Anhang (Login nötig)
+                                ├── POST /request-inspection  Öffentliche Prüfungsanfrage per QR (kein Login, Cooldown)
+                                ├── GET  /auth/status      Existiert ein Benutzer? (Setup nötig?)
+                                ├── GET  /auth/me          Angemeldeten Benutzer ermitteln
+                                ├── POST /auth/login       Anmelden (E-Mail/Name + Passwort → Token)
+                                ├── POST /auth/setup       Ersten Administrator anlegen
+                                ├── GET  /inspectors       Aktive Prüfer für die Auswahl
+                                └── /users (GET/POST/PATCH/DELETE)  Benutzerverwaltung (nur Admin)
 ```
 
-> Der Zugangscode wird ausschließlich als Hash (scrypt) im Datenverzeichnis (`auth.json`) gespeichert.
-> Bei vergessenem Code genügt das Löschen dieser Datei zum Zurücksetzen.
+> Passwörter werden ausschließlich als Hash (scrypt) gespeichert; Tokens sind HMAC-signiert
+> und enthalten die Benutzer-ID (30 Tage gültig). Beim Vercel-Betrieb liegen die Konten in
+> der Supabase-Tabelle `app_users`.
 
 ---
 
@@ -115,7 +119,7 @@ ist dafür als Vercel-Serverless-Function (`api/[...path].js`) umgesetzt, die Da
 erfolgt in **Supabase** (Postgres) statt in JSON-Dateien.
 
 ### 1. Supabase vorbereiten
-Zwei Tabellen werden benötigt (einmalig per SQL anlegen):
+Drei Tabellen werden benötigt (einmalig per SQL anlegen):
 
 ```sql
 create table if not exists public.app_kv (
@@ -123,12 +127,23 @@ create table if not exists public.app_kv (
   value jsonb not null,
   updated_at timestamptz not null default now()
 );
-create table if not exists public.app_auth (
+create table if not exists public.app_auth (        -- Singleton: Token-Secret
   id int primary key default 1,
   hash text, salt text, secret text
 );
-alter table public.app_kv   enable row level security;
-alter table public.app_auth enable row level security;
+create table if not exists public.app_users (       -- Benutzerkonten (Prüfer)
+  id text primary key,
+  name text not null,
+  email text,
+  role text not null default 'pruefer',
+  hash text not null,
+  salt text not null,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+alter table public.app_kv    enable row level security;
+alter table public.app_auth  enable row level security;
+alter table public.app_users enable row level security;
 -- keine Policies: nur der Service-Role-Key (serverseitig) hat Zugriff
 ```
 
@@ -145,8 +160,8 @@ Mit dem Vercel-Dashboard (GitHub-Import) oder der Vercel-CLI. Vercel erkennt Vit
 baut nach `dist/` und stellt `api/*` als Functions bereit. `vercel.json` sorgt für das
 SPA-Fallback, damit die QR-Links `/l/<id>` funktionieren.
 
-> **Wichtig:** Direkt nach dem ersten Deploy unter **Einstellungen → Zugang** einen Zugangscode
-> setzen — bis dahin ist die öffentlich erreichbare App ohne Schutz beschreibbar.
+> **Wichtig:** Direkt nach dem ersten Deploy die **Ersteinrichtung** durchführen (ersten Administrator
+> anlegen) — bis dahin ist die öffentlich erreichbare App ungeschützt.
 
 ---
 
