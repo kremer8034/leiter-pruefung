@@ -78,7 +78,7 @@ Digitale Leiterprüfungs-App für Hilfsorganisationen und Betriebe zur rechtssic
 | PDF | jsPDF + jspdf-autotable |
 | Backend | Node.js, Express |
 | E-Mail | Nodemailer |
-| Datenspeicher | JSON-Dateien in Docker-Volume |
+| Datenspeicher | JSON-Dateien in Docker-Volume · oder Supabase (Vercel-Deploy) |
 | Webserver | nginx (statische Dateien + API-Proxy) |
 | Deployment | Docker, Traefik v3, Let's Encrypt |
 
@@ -105,6 +105,48 @@ Browser (React SPA)
 
 > Der Zugangscode wird ausschließlich als Hash (scrypt) im Datenverzeichnis (`auth.json`) gespeichert.
 > Bei vergessenem Code genügt das Löschen dieser Datei zum Zurücksetzen.
+
+---
+
+## Deployment auf Vercel (Serverless + Supabase)
+
+Neben dem Docker-Setup kann die App auch komplett auf **Vercel** laufen. Das Express-Backend
+ist dafür als Vercel-Serverless-Function (`api/[...path].js`) umgesetzt, die Datenhaltung
+erfolgt in **Supabase** (Postgres) statt in JSON-Dateien.
+
+### 1. Supabase vorbereiten
+Zwei Tabellen werden benötigt (einmalig per SQL anlegen):
+
+```sql
+create table if not exists public.app_kv (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.app_auth (
+  id int primary key default 1,
+  hash text, salt text, secret text
+);
+alter table public.app_kv   enable row level security;
+alter table public.app_auth enable row level security;
+-- keine Policies: nur der Service-Role-Key (serverseitig) hat Zugriff
+```
+
+### 2. Environment-Variablen in Vercel setzen
+Unter **Project → Settings → Environment Variables**:
+
+| Name | Wert |
+|------|------|
+| `SUPABASE_URL` | `https://<project-ref>.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service-Role-Key aus Supabase (Settings → API). **Geheim halten!** |
+
+### 3. Deployen
+Mit dem Vercel-Dashboard (GitHub-Import) oder der Vercel-CLI. Vercel erkennt Vite automatisch,
+baut nach `dist/` und stellt `api/*` als Functions bereit. `vercel.json` sorgt für das
+SPA-Fallback, damit die QR-Links `/l/<id>` funktionieren.
+
+> **Wichtig:** Direkt nach dem ersten Deploy unter **Einstellungen → Zugang** einen Zugangscode
+> setzen — bis dahin ist die öffentlich erreichbare App ohne Schutz beschreibbar.
 
 ---
 
