@@ -21,6 +21,36 @@ const TYPE_LABELS = {
   stehleiter: "Stehleiter", anlegeleiter: "Anlegeleiter", mehrzweckleiter: "Mehrzweckleiter",
   trittleiter: "Trittleiter / Tritt", schiebeleiter: "Schiebeleiter", podestleiter: "Podestleiter",
 };
+const SP_TYPES = ["stehleiter","anlegeleiter","mehrzweckleiter","trittleiter","schiebeleiter","podestleiter"];
+function normalizeType(t) {
+  const k = String(t || "").trim().toLowerCase();
+  if (SP_TYPES.includes(k)) return k;
+  if (k.startsWith("steh")) return "stehleiter";
+  if (k.startsWith("anlege")) return "anlegeleiter";
+  if (k.startsWith("mehrzweck")) return "mehrzweckleiter";
+  if (k.startsWith("tritt")) return "trittleiter";
+  if (k.startsWith("schiebe")) return "schiebeleiter";
+  if (k.startsWith("podest")) return "podestleiter";
+  return "stehleiter";
+}
+function normalizeLadder(l) {
+  return {
+    id: String(l.id != null && l.id !== "" ? l.id : (l.inventoryNr || "")).trim(),
+    inventoryNr: l.inventoryNr != null ? String(l.inventoryNr) : "",
+    name: l.name || "",
+    type: normalizeType(l.type),
+    material: l.material || "",
+    manufacturer: l.manufacturer || "",
+    year: l.year != null ? String(l.year) : "",
+    location: l.location || "",
+    maxLoad: l.maxLoad != null ? String(l.maxLoad) : "",
+    length: l.length != null ? String(l.length) : "",
+    notes: l.notes || "",
+    photo: l.photo || "",
+    retired: l.retired === true || String(l.retired).toLowerCase() === "true" || String(l.status || "").toLowerCase().includes("ausgemustert"),
+    _source: "sharepoint",
+  };
+}
 const TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30; // 30 Tage
 const REQUEST_COOLDOWN_MS = 1000 * 60 * 10;    // 10 Min. (best-effort, in-memory)
 const reqCooldown = new Map();
@@ -111,10 +141,16 @@ async function currentUser(req) {
   return u && u.active ? u : null;
 }
 
-// SMTP-Passwort niemals an Clients ausliefern.
+// Geheimnisse (SMTP-Passwort, SharePoint-URLs/Secret) niemals an Clients ausliefern.
 function stripSecret(key, value) {
-  if (key === "lp_pruefer" && value && value.smtp) {
-    return { ...value, smtp: { ...value.smtp, pass: "" } };
+  if (key === "lp_pruefer" && value) {
+    const out = { ...value };
+    if (out.smtp) out.smtp = { ...out.smtp, pass: "" };
+    if (out.integration) {
+      const ig = out.integration;
+      out.integration = { enabled: !!ig.enabled, hasOutbound: !!ig.outboundUrl, hasInboundSecret: !!ig.inboundSecret };
+    }
+    return out;
   }
   return value;
 }
@@ -302,6 +338,59 @@ export default async function handler(req, res) {
       return res.json(await runReminders());
     }
 
+    // ── SharePoint: Stammdaten-Eingang (Push aus Power Automate) ──
+    if (route === "sharepoint/ladders" && method === "POST") {
+      const settings = (await readStore("lp_pruefer")) || {};
+      const integ = settings.integration || {};
+      if (!integ.enabled) return res.status(403).json({ error: "SharePoint-Integration ist deaktiviert" });
+      if (!integ.inboundSecret) return res.status(400).json({ error: "Kein Inbound-Secret konfiguriert" });
+      const body = readBody(req);
+      const provided = req.headers["x-lp-secret"] || body.secret;
+      if (provided !== integ.inboundSecret) return res.status(401).json({ error: "Ungültiges Secret" });
+
+      let incoming = [];
+      if (Array.isArray(body.ladders)) incoming = body.ladders;
+      else if (body.ladder) incoming = [body.ladder];
+      else return res.status(400).json({ error: "Erwartet: ladders[] oder ladder{}" });
+      const norm = incoming.map(normalizeLadder).filter(l => l.id);
+      const mode = body.mode === "replace" ? "replace" : "upsert";
+
+      let next;
+      if (mode === "replace") {
+        next = norm;
+      } else {
+        const existing = (await readStore("lp_ladders")) || [];
+        const map = new Map(existing.map(l => [String(l.id), l]));
+        for (const l of norm) map.set(String(l.id), { ...map.get(String(l.id)), ...l });
+        next = [...map.values()];
+      }
+      await writeStore("lp_ladders", next);
+      return res.json({ ok: true, received: incoming.length, total: next.length, mode });
+    }
+
+    // ── SharePoint: Protokoll-Ausgang (App → Power-Automate-Flow) ──
+    if (route === "sharepoint/push-protocol" && method === "POST") {
+      if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });
+      const settings = (await readStore("lp_pruefer")) || {};
+      const integ = settings.integration || {};
+      if (!integ.enabled || !integ.outboundUrl) return res.status(400).json({ error: "SharePoint-Ausgang nicht konfiguriert" });
+      const { filename, pdfBase64, meta } = readBody(req);
+      if (!pdfBase64) return res.status(400).json({ error: "pdfBase64 fehlt" });
+      try {
+        const r = await fetch(integ.outboundUrl, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filename: filename || "Pruefprotokoll.pdf", pdfBase64, meta: meta || {} }),
+        });
+        if (!r.ok) {
+          const t = await r.text().catch(() => "");
+          return res.status(502).json({ error: `Flow antwortete ${r.status}${t ? ": " + t.slice(0, 200) : ""}` });
+        }
+        return res.json({ ok: true });
+      } catch (e) {
+        return res.status(502).json({ error: "Flow nicht erreichbar: " + (e && e.message) });
+      }
+    }
+
     // ── Alle Datensätze ──
     if (route === "data-all" && method === "GET") {
       const out = {};
@@ -321,11 +410,19 @@ export default async function handler(req, res) {
         if (!(await currentUser(req))) return res.status(401).json({ error: "Nicht autorisiert" });
         let value = readBody(req).value;
         if (value === undefined) return res.status(400).json({ error: "value fehlt" });
-        // Leeres SMTP-Passwort beim Speichern → bestehendes Passwort beibehalten
-        if (key === "lp_pruefer" && value && value.smtp && !value.smtp.pass) {
-          const existing = await readStore("lp_pruefer");
-          if (existing && existing.smtp && existing.smtp.pass) {
+        // Geheimnisse beim Speichern bewahren, wenn das Feld leer übermittelt wird
+        if (key === "lp_pruefer" && value) {
+          const existing = (await readStore("lp_pruefer")) || {};
+          if (value.smtp && !value.smtp.pass && existing.smtp && existing.smtp.pass) {
             value = { ...value, smtp: { ...value.smtp, pass: existing.smtp.pass } };
+          }
+          if (value.integration) {
+            const exIg = existing.integration || {};
+            const ig = { ...value.integration };
+            delete ig.hasOutbound; delete ig.hasInboundSecret; // nur Anzeige-Flags vom Client
+            if (!ig.outboundUrl && exIg.outboundUrl) ig.outboundUrl = exIg.outboundUrl;
+            if (!ig.inboundSecret && exIg.inboundSecret) ig.inboundSecret = exIg.inboundSecret;
+            value = { ...value, integration: ig };
           }
         }
         await writeStore(key, value);

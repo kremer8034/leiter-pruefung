@@ -355,6 +355,28 @@ function getPDFBase64(inspection, ladder) {
   return buildPDF(inspection, ladder).output("datauristring").split(",")[1];
 }
 
+// ─── SharePoint: Protokoll an Power Automate senden ───
+function buildProtocolMeta(insp, lad) {
+  const qs = getQuestionsForType(lad.type);
+  const maengel = qs.filter(q => insp.answers?.[q.id] === "mangel").length;
+  return {
+    inventarNr: lad.inventoryNr || "",
+    bezeichnung: lad.name || "",
+    typ: LADDER_TYPES.find(t => t.id === lad.type)?.label || lad.type || "",
+    standort: lad.location || "",
+    pruefdatum: new Date(insp.date).toISOString().slice(0, 10),
+    pruefer: insp.inspector || "",
+    ergebnis: insp.result === "bestanden" ? "Bestanden" : "Nicht bestanden",
+    naechstePruefung: insp.nextDate ? new Date(insp.nextDate).toISOString().slice(0, 10) : "",
+    maengelanzahl: maengel,
+  };
+}
+function pushProtocolSP(insp, lad) {
+  const safeNr = String(lad.inventoryNr || "x").replace(/[^\w.-]+/g, "_");
+  const filename = `Pruefprotokoll_${safeNr}_${new Date(insp.date).toISOString().slice(0, 10)}.pdf`;
+  return apiJSON("/sharepoint/push-protocol", { method: "POST", body: { filename, pdfBase64: getPDFBase64(insp, lad), meta: buildProtocolMeta(insp, lad) } });
+}
+
 // E-Mail mit PDF-Anhang via SMTP
 async function sendEmailAPI(inspection, ladder, emailTo, smtp) {
   const pdfBase64 = getPDFBase64(inspection, ladder);
@@ -416,8 +438,10 @@ const EMPTY_SETTINGS = {
   inspector: "", company: "BRK Bereitschaft Großheubach", interval: 12, email: "", requestEmail: "",
   smtp: { host:"", port:"587", user:"", pass:"", secure:false },
   reminders: { enabled:true, leadDays:0, repeatDays:0, recipients:"inspector", customEmail:"", ccAdmins:false, includeYearOverview:true },
+  integration: { enabled:false, outboundUrl:"", inboundSecret:"", hasOutbound:false, hasInboundSecret:false },
 };
 const EMPTY_REMINDERS = EMPTY_SETTINGS.reminders;
+const EMPTY_INTEGRATION = EMPTY_SETTINGS.integration;
 
 // Reiter im Einstellungsbereich (auch im Seitenmenü als Unterpunkte nutzbar)
 const SETTINGS_TABS = [
@@ -425,6 +449,7 @@ const SETTINGS_TABS = [
   { id:"pruefer",     label:"Prüfer",      icon:"👥", adminOnly:true },
   { id:"email",       label:"E-Mail",      icon:"✉️" },
   { id:"standorte",   label:"Standorte",   icon:"📍" },
+  { id:"sharepoint",  label:"SharePoint",  icon:"🔗", adminOnly:true },
   { id:"rechtliches", label:"Recht",       icon:"⚖️" },
 ];
 
@@ -513,7 +538,7 @@ export default function App() {
       setLadders(ladrs);
       setInspections(insps);
       setLocations(locs);
-      setSettings({ ...EMPTY_SETTINGS, ...sett, smtp:{...EMPTY_SETTINGS.smtp,...(sett.smtp||{})}, reminders:{...EMPTY_REMINDERS,...(sett.reminders||{})} });
+      setSettings({ ...EMPTY_SETTINGS, ...sett, smtp:{...EMPTY_SETTINGS.smtp,...(sett.smtp||{})}, reminders:{...EMPTY_REMINDERS,...(sett.reminders||{})}, integration:{...EMPTY_INTEGRATION,...(sett.integration||{})} });
       setLoading(false);
     })();
   }, []);
@@ -1191,6 +1216,7 @@ function DashboardView({ stats, ladders, inspections, locations, getLastInspecti
 
 // ─── Leiterdatenbank ───
 function LaddersView({ ladders, saveLadders, locations, inspections, getLastInspection, isOverdue, showToast, settings }) {
+  const spLocked = !!settings.integration?.enabled;
   const [search, setSearch]         = useState("");
   const [form, setForm]             = useState(null);
   const [detailLadder, setDetailLadder] = useState(null);
@@ -1314,12 +1340,14 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
         </div>
         {qrLadder && <QrCodeModal ladder={qrLadder} onClose={()=>setQrLadder(null)} />}
         <div style={{display:"flex",gap:10,flexWrap:"wrap",marginBottom:22}}>
-          <button style={S.actionBtn} onClick={()=>{setForm({...lad});setDetailLadder(null);}}>✏️ Bearbeiten</button>
           <button style={{...S.actionBtn,color:DRK,borderColor:DRK}} onClick={()=>setQrLadder(lad)}>🔳 QR-Code</button>
-          <button style={{...S.actionBtn,color:lad.retired?"#2d6a4f":"#e09f3e",borderColor:lad.retired?"#2d6a4f":"#e09f3e"}} onClick={()=>handleRetire(lad)}>
-            {lad.retired?"✅ Reaktivieren":"📦 Ausmustern"}
-          </button>
-          <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#c1121f"}} onClick={()=>handleDelete(lad.id)}>🗑️ Löschen</button>
+          {!spLocked && <>
+            <button style={S.actionBtn} onClick={()=>{setForm({...lad});setDetailLadder(null);}}>✏️ Bearbeiten</button>
+            <button style={{...S.actionBtn,color:lad.retired?"#2d6a4f":"#e09f3e",borderColor:lad.retired?"#2d6a4f":"#e09f3e"}} onClick={()=>handleRetire(lad)}>
+              {lad.retired?"✅ Reaktivieren":"📦 Ausmustern"}
+            </button>
+            <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#c1121f"}} onClick={()=>handleDelete(lad.id)}>🗑️ Löschen</button>
+          </>}
         </div>
         <h3 style={S.sectionTitle}>Prüfhistorie ({ladInsp.length})</h3>
         {ladInsp.length===0
@@ -1353,8 +1381,9 @@ function LaddersView({ ladders, saveLadders, locations, inspections, getLastInsp
     <div style={S.page}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",flexWrap:"wrap",gap:10,marginBottom:4}}>
         <h2 style={{...S.pageTitle,marginBottom:0}}>Leiterdatenbank ({activeLadders.length})</h2>
-        <button style={{...S.primaryBtn,width:"auto",marginTop:0,padding:"12px 20px"}} onClick={()=>setForm({...emptyForm})}>+ Neue Leiter</button>
+        {!spLocked && <button style={{...S.primaryBtn,width:"auto",marginTop:0,padding:"12px 20px"}} onClick={()=>setForm({...emptyForm})}>+ Neue Leiter</button>}
       </div>
+      {spLocked && <div style={{...S.hintBox,marginTop:10,marginBottom:6}}>🔗 Stammdaten werden über <strong>SharePoint</strong> gepflegt — in der App schreibgeschützt.</div>}
       <input style={S.searchInput} placeholder="🔍 Suche nach Nr., Name, Standort…" value={search} onChange={e=>setSearch(e.target.value)} />
       {retiredLadders.length>0&&(
         <button style={{...S.linkBtn,marginBottom:14,display:"block"}} onClick={()=>setShowRetired(!showRetired)}>
@@ -1436,6 +1465,9 @@ function InspectionView({ ladders, selectedLadder, setSelectedLadder, inspection
     showToast("Prüfung gespeichert!");
     setInspectionState(insp); setStep(4);
     triggerEmail(insp, selectedLadder);
+    if (settings.integration?.enabled && settings.integration?.hasOutbound) {
+      pushProtocolSP(insp, selectedLadder).catch(e => showToast("SharePoint: " + e.message, "error"));
+    }
   };
 
   const reset = () => { setSelectedLadder(null);setAnswers({});setNotes({});setGeneralNotes("");setStep(0);setInspectionState(null);setEmailStatus(null);setEmailError("");setInspectorId(currentUser?.id||""); };
@@ -1782,6 +1814,7 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
               <button style={S.actionBtn} onClick={()=>downloadPDF(insp,lad||{inventoryNr:"?",name:"Gelöscht",type:"stehleiter",manufacturer:"",material:"",year:"",location:""})}>📄 PDF</button>
               {smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailAPI(insp,lad,settings.email,settings.smtp).then(()=>showToast("E-Mail gesendet")).catch(e=>showToast("Fehler: "+e.message,"error"))}>✉️ E-Mail</button>}
               {settings.email&&!smtpOk&&lad&&<button style={S.actionBtn} onClick={()=>sendEmailMailto(insp,lad,settings.email)}>✉️ E-Mail</button>}
+              {settings.integration?.enabled&&settings.integration?.hasOutbound&&lad&&<button style={S.actionBtn} onClick={()=>pushProtocolSP(insp,lad).then(()=>showToast("An SharePoint gesendet")).catch(e=>showToast("SharePoint: "+e.message,"error"))}>🔗 SharePoint</button>}
               <button style={{...S.actionBtn,color:"#c1121f",borderColor:"#ffcdd2"}} onClick={()=>del(insp.id)}>🗑️ Löschen</button>
             </div>
           </div>
@@ -1794,9 +1827,12 @@ function HistoryView({ inspections, ladders, saveInspections, showToast, setting
 // ─── Einstellungen ───
 function SettingsView({ settings, saveSettings, locations, saveLocations, ladders, saveLadders, showToast, currentUser, logout, refreshInspectors, activeTab, setActiveTab }) {
   const isAdmin = currentUser?.role === "admin";
-  const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})},reminders:{...EMPTY_REMINDERS,...(settings.reminders||{})}});
+  const [form, setForm] = useState({...EMPTY_SETTINGS,...settings,smtp:{...EMPTY_SETTINGS.smtp,...(settings.smtp||{})},reminders:{...EMPTY_REMINDERS,...(settings.reminders||{})},integration:{...EMPTY_INTEGRATION,...(settings.integration||{})}});
   const rem = form.reminders;
   const setRem = (patch) => setForm(f => ({...f, reminders:{...f.reminders, ...patch}}));
+  const integ = form.integration;
+  const setInteg = (patch) => setForm(f => ({...f, integration:{...f.integration, ...patch}}));
+  const spEndpoint = `${window.location.origin}/api/sharepoint/ladders`;
   const [newLoc, setNewLoc]       = useState("");
   const [editingLoc, setEditingLoc] = useState(null);
   const [editLocVal, setEditLocVal] = useState("");
@@ -2117,6 +2153,48 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
             ))
           }
           <p style={{fontSize:13,color:"#aaa",marginTop:8}}>Umbenennen aktualisiert alle zugehörigen Leitern automatisch.</p>
+        </div>
+      )}
+
+      {activeTab==="sharepoint"&&isAdmin&&(
+        <div style={S.settingsSection}>
+          <h3 style={S.sectionTitle}>Microsoft SharePoint / Power Automate</h3>
+          <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 14px",borderRadius:10,marginBottom:14,
+            background:integ.enabled?"#d4edda":"#f5f5f5",color:integ.enabled?"#2d6a4f":"#666",fontSize:14,fontWeight:600}}>
+            {integ.enabled ? "🔗 Integration aktiv — Stammdaten kommen aus SharePoint" : "○ Integration inaktiv — Stammdaten werden in der App gepflegt"}
+          </div>
+
+          <label style={{display:"flex",alignItems:"center",gap:12,cursor:"pointer",fontSize:15,padding:"12px 14px",background:"#f5f5f5",borderRadius:10,marginBottom:16}}>
+            <input type="checkbox" checked={integ.enabled} onChange={e=>setInteg({enabled:e.target.checked})} style={{accentColor:DRK,width:20,height:20}} />
+            SharePoint-Integration aktivieren
+          </label>
+          <p style={{fontSize:13,color:"#888",marginBottom:16,lineHeight:1.6}}>
+            Bei aktiver Integration ist die <strong>Leiterdatenbank schreibgeschützt</strong> (Pflege erfolgt in SharePoint), und abgeschlossene <strong>Prüfprotokolle</strong> werden automatisch in deine SharePoint-Dokumentbibliothek geschoben.
+          </p>
+
+          <h4 style={{margin:"6px 0 8px",fontSize:14}}>① Stammdaten-Eingang (Push aus SharePoint)</h4>
+          <div style={S.fieldWrap}>
+            <label style={S.fieldLabel}>Endpunkt-URL für deinen Power-Automate-Flow</label>
+            <div style={{display:"flex",gap:8}}>
+              <input style={{...S.input,flex:1,fontSize:13}} readOnly value={spEndpoint} onFocus={e=>e.target.select()} />
+              <button style={{...S.actionBtn}} onClick={()=>{navigator.clipboard?.writeText(spEndpoint);showToast("URL kopiert");}}>Kopieren</button>
+            </div>
+            <div style={{fontSize:12,color:"#888",marginTop:6}}>In Flow A als „HTTP"-Aktion (POST) mit Header <code>x-lp-secret</code> aufrufen.</div>
+          </div>
+          <Field label={integ.hasInboundSecret?"Inbound-Secret (gespeichert — neu setzen zum Ändern)":"Inbound-Secret festlegen"} value={integ.inboundSecret} onChange={v=>setInteg({inboundSecret:v})} placeholder={integ.hasInboundSecret?"•••••••• (unverändert lassen = leer)":"langer Zufallswert"} type="password" />
+          <button style={{...S.secondaryBtn,marginBottom:6}} onClick={()=>setInteg({inboundSecret:(crypto?.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Math.random().toString(36).slice(2))})}>🔁 Secret erzeugen</button>
+
+          <h4 style={{margin:"18px 0 8px",fontSize:14}}>② Protokoll-Ausgang (App → SharePoint)</h4>
+          <Field label={integ.hasOutbound?"Outbound-Flow-URL (gespeichert — neu setzen zum Ändern)":"Outbound-Flow-URL (HTTP-Trigger)"} value={integ.outboundUrl} onChange={v=>setInteg({outboundUrl:v})} placeholder={integ.hasOutbound?"•••••••• (unverändert lassen = leer)":"https://…logic.azure.com/…"} type="password" />
+
+          <button style={S.primaryBtn} onClick={save}>💾 SharePoint-Einstellungen speichern</button>
+
+          <div style={{marginTop:16,padding:"12px 14px",background:"#f5f7fa",border:"1px solid #e3e8ef",borderRadius:10,fontSize:13,color:"#555",lineHeight:1.7}}>
+            <strong style={{color:"#333"}}>Erwartete Datenformate</strong><br/>
+            <strong>Eingang</strong> (Flow → App): <code>{`{ "ladders":[{ "id","inventoryNr","name","type","material","manufacturer","year","location","maxLoad","length","notes","retired" }] }`}</code><br/>
+            <code>type</code> darf deutscher Text sein (z. B. „Stehleiter"). Ausmustern via Status → <code>retired:true</code>.<br/><br/>
+            <strong>Ausgang</strong> (App → Flow): <code>{`{ "filename","pdfBase64","meta":{ "inventarNr","bezeichnung","typ","standort","pruefdatum","pruefer","ergebnis","naechstePruefung","maengelanzahl" } }`}</code>
+          </div>
         </div>
       )}
 
