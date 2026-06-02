@@ -44,6 +44,8 @@ async function authMe() {
 function authLogin(identifier, password) { return apiJSON("/auth/login", { method: "POST", body: { identifier, password } }); }
 function authSetup(name, email, password) { return apiJSON("/auth/setup", { method: "POST", body: { name, email, password } }); }
 function changeOwnPassword(currentPassword, newPassword) { return apiJSON("/auth/password", { method: "POST", body: { currentPassword, newPassword } }); }
+function authForgot(email) { return apiJSON("/auth/forgot", { method: "POST", body: { email } }); }
+function authReset(token, newPassword) { return apiJSON("/auth/reset", { method: "POST", body: { token, newPassword } }); }
 
 // ── Benutzerverwaltung ──
 function listUsers()            { return apiJSON("/users"); }
@@ -75,8 +77,12 @@ function ladderPublicUrl(ladder) {
   return `${window.location.origin}/l/${encodeURIComponent(ladder.id)}`;
 }
 function parseRoute() {
-  const m = window.location.pathname.match(/^\/l\/([^/]+)\/?$/);
-  return m ? { type: "public", ladderId: decodeURIComponent(m[1]) } : { type: "app" };
+  const p = window.location.pathname;
+  const ml = p.match(/^\/l\/([^/]+)\/?$/);
+  if (ml) return { type: "public", ladderId: decodeURIComponent(ml[1]) };
+  const mr = p.match(/^\/reset\/([^/]+)\/?$/);
+  if (mr) return { type: "reset", token: decodeURIComponent(mr[1]) };
+  return { type: "app" };
 }
 
 // ─── Leitertypen & Materialien ───
@@ -560,6 +566,11 @@ export default function App() {
     never:   activeLadders.filter(l=>!getLastInspection(l.id)).length,
   };
 
+  // Passwort-Reset (Link aus E-Mail) — ohne Anmeldung
+  if (route.type === "reset") {
+    return <ResetPasswordView token={route.token} company={settings.company} onDone={()=>navigate("/")} showToast={showToast} />;
+  }
+
   if (loading) return (
     <div style={S.loadScreen}>
       <div style={{fontSize:64,marginBottom:16}}>⊼</div>
@@ -850,6 +861,7 @@ function LoginForm({ onSuccess, compact }) {
   const [password, setPassword]     = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr]   = useState("");
+  const [forgotOpen, setForgotOpen] = useState(false);
 
   const submit = async () => {
     if (!identifier || !password) { setErr("Bitte E-Mail/Name und Passwort eingeben."); return; }
@@ -862,6 +874,7 @@ function LoginForm({ onSuccess, compact }) {
 
   return (
     <div>
+      {forgotOpen && <ForgotPasswordModal initialEmail={identifier.includes("@") ? identifier : ""} onClose={() => setForgotOpen(false)} />}
       <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Anmelden</h3>
       <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Mit E-Mail (oder Name) und Passwort.</p>
       <input style={{ ...S.input, marginBottom:10 }} type="text" autoFocus value={identifier}
@@ -874,6 +887,99 @@ function LoginForm({ onSuccess, compact }) {
       <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
         {busy ? "Anmelden…" : "Anmelden"}
       </button>
+      <button style={{ ...S.linkBtn, display:"block", margin:"12px auto 0" }} onClick={() => setForgotOpen(true)}>Passwort vergessen?</button>
+    </div>
+  );
+}
+
+// ─── Dialog „Passwort vergessen" (Reset-Link anfordern) ───
+function ForgotPasswordModal({ initialEmail, onClose }) {
+  const [email, setEmail] = useState(initialEmail || "");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+
+  const submit = async () => {
+    if (!email.trim()) return;
+    setBusy(true);
+    try { await authForgot(email.trim()); } catch {}
+    setBusy(false); setDone(true); // immer generische Bestätigung
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={S.modalBox} onClick={e => e.stopPropagation()}>
+        <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Passwort vergessen</h3>
+        {done ? (
+          <>
+            <p style={{ fontSize:14, color:"#555", lineHeight:1.5, margin:"6px 0 18px" }}>
+              Falls ein Konto mit dieser E-Mail existiert, wurde ein Link zum Zurücksetzen gesendet. Bitte prüfe dein Postfach (Link 1 Stunde gültig).
+            </p>
+            <button style={{ ...S.primaryBtn }} onClick={onClose}>Schließen</button>
+          </>
+        ) : (
+          <>
+            <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Gib deine E-Mail-Adresse ein — wir senden dir einen Link zum Zurücksetzen.</p>
+            <input style={S.input} type="email" autoFocus value={email} placeholder="name@example.de"
+              autoComplete="email" onChange={e => setEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && submit()} />
+            <div style={{ display:"flex", gap:10, marginTop:16 }}>
+              <button style={{ ...S.secondaryBtn, flex:1 }} onClick={onClose}>Abbrechen</button>
+              <button style={{ ...S.primaryBtn, flex:2, marginTop:0, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+                {busy ? "Senden…" : "Link senden"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Passwort-Reset-Seite (Ziel des E-Mail-Links /reset/<token>) ───
+function ResetPasswordView({ token, company, onDone, showToast }) {
+  const [nw, setNw]   = useState("");
+  const [nw2, setNw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+  const [ok, setOk]     = useState(false);
+
+  const submit = async () => {
+    if (nw.length < 6) { setErr("Neues Passwort: mindestens 6 Zeichen."); return; }
+    if (nw !== nw2) { setErr("Die Passwörter stimmen nicht überein."); return; }
+    setBusy(true); setErr("");
+    try { await authReset(token, nw); setOk(true); showToast && showToast("Passwort gesetzt — bitte anmelden"); }
+    catch (e) { setErr(e.message || "Zurücksetzen fehlgeschlagen"); setBusy(false); }
+  };
+
+  return (
+    <div style={S.loginShell}>
+      <div style={{ maxWidth:400, width:"100%" }}>
+        <div style={{ textAlign:"center", color:"#fff", marginBottom:20 }}>
+          <div style={{ fontSize:56, marginBottom:8 }}>⊼</div>
+          <div style={{ fontSize:20, fontWeight:700 }}>Passwort zurücksetzen</div>
+          <div style={{ fontSize:13, opacity:0.85, marginTop:4 }}>{company || "Leiterprüfung"}</div>
+        </div>
+        <div style={{ background:"#fff", borderRadius:16, padding:24, boxShadow:"0 8px 32px rgba(0,0,0,0.25)" }}>
+          {ok ? (
+            <>
+              <h3 style={{ margin:"0 0 8px", fontSize:18 }}>✓ Erledigt</h3>
+              <p style={{ fontSize:14, color:"#555", lineHeight:1.5, margin:"0 0 18px" }}>Dein Passwort wurde gesetzt. Du kannst dich jetzt anmelden.</p>
+              <button style={{ ...S.primaryBtn }} onClick={onDone}>Zur Anmeldung</button>
+            </>
+          ) : (
+            <>
+              <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Neues Passwort festlegen</h3>
+              <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Bitte vergib ein neues Passwort für dein Konto.</p>
+              <Field label="Neues Passwort" value={nw} onChange={setNw} placeholder="mind. 6 Zeichen" type="password" />
+              <Field label="Neues Passwort wiederholen" value={nw2} onChange={setNw2} placeholder="Wiederholen" type="password" />
+              {err && <div style={{ color:"#c1121f", fontSize:13, marginBottom:10 }}>✗ {err}</div>}
+              <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+                {busy ? "Wird gespeichert…" : "Passwort speichern"}
+              </button>
+              <button style={{ ...S.linkBtn, display:"block", margin:"12px auto 0" }} onClick={onDone}>Zurück zur Anmeldung</button>
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

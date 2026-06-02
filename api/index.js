@@ -69,6 +69,7 @@ async function writeStore(key, value) {
 // ─── Benutzerkonten & Zugangsschutz ───
 function genId() { return "U" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 function hashPassword(pw, salt) { return crypto.scryptSync(String(pw), salt, 64).toString("hex"); }
+function sha256(s) { return crypto.createHash("sha256").update(String(s)).digest("hex"); }
 function verifyPassword(pw, user) {
   if (!pw || !user || !user.hash) return false;
   const a = Buffer.from(hashPassword(pw, user.salt), "hex");
@@ -468,6 +469,54 @@ export default async function handler(req, res) {
       if (!newPassword || String(newPassword).length < 6) return res.status(400).json({ error: "Neues Passwort muss mindestens 6 Zeichen haben" });
       const salt = crypto.randomBytes(16).toString("hex");
       const upd = await supabase.from("app_users").update({ hash: hashPassword(newPassword, salt), salt }).eq("id", me.id);
+      if (upd.error) throw upd.error;
+      return res.json({ ok: true });
+    }
+
+    // Passwort vergessen — Reset-Link per E-Mail anfordern (generische Antwort)
+    if (route === "auth/forgot" && method === "POST") {
+      const idn = String(readBody(req).email || "").trim();
+      if (idn) {
+        const r = await supabase.from("app_users").select("*").ilike("email", idn).eq("active", true);
+        const user = (r.data || [])[0];
+        const settings = (await readStore("lp_pruefer")) || {};
+        const smtp = settings.smtp || {};
+        if (user && user.email && smtp.host && smtp.user && smtp.pass) {
+          const token = crypto.randomBytes(32).toString("hex");
+          await supabase.from("app_users").update({ reset_hash: sha256(token), reset_exp: Date.now() + 1000 * 60 * 60 }).eq("id", user.id);
+          const host = req.headers["x-forwarded-host"] || req.headers.host;
+          const proto = req.headers["x-forwarded-proto"] || "https";
+          const link = `${proto}://${host}/reset/${token}`;
+          const port = parseInt(smtp.port) || 587;
+          const secure = smtp.secure === true || port === 465;
+          const html = `
+<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+  <div style="background:#E30613;color:#fff;padding:20px;border-radius:6px 6px 0 0;"><h2 style="margin:0;font-size:18px;">Passwort zurücksetzen</h2></div>
+  <div style="padding:20px;background:#f9f9f9;border:1px solid #ddd;border-top:none;border-radius:0 0 6px 6px;">
+    <p style="font-size:15px;margin:0 0 14px;">Hallo ${user.name || ""}, du hast das Zurücksetzen deines Passworts angefordert.</p>
+    <p style="margin:0 0 18px;"><a href="${link}" style="background:#E30613;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:bold;display:inline-block;">Neues Passwort festlegen</a></p>
+    <p style="font-size:13px;color:#666;margin:0 0 6px;">Oder diesen Link öffnen:<br><span style="word-break:break-all;">${link}</span></p>
+    <p style="font-size:12px;color:#888;margin:14px 0 0;">Der Link ist 1 Stunde gültig. Falls du das nicht warst, ignoriere diese E-Mail.</p>
+  </div>
+</div>`;
+          try {
+            const transporter = nodemailer.createTransport({ host: smtp.host, port, secure, auth: { user: smtp.user, pass: smtp.pass }, tls: { rejectUnauthorized: false } });
+            await transporter.sendMail({ from: `"Leiterprüfung" <${smtp.user}>`, to: user.email, subject: "Passwort zurücksetzen – Leiterprüfung", html });
+          } catch (e) { console.error("[ERR] reset mail:", e && e.message); }
+        }
+      }
+      return res.json({ ok: true });
+    }
+
+    // Passwort mit Reset-Token neu setzen
+    if (route === "auth/reset" && method === "POST") {
+      const { token, newPassword } = readBody(req);
+      if (!token || !newPassword || String(newPassword).length < 6) return res.status(400).json({ error: "Token und neues Passwort (mind. 6 Zeichen) erforderlich" });
+      const r = await supabase.from("app_users").select("*").eq("reset_hash", sha256(token));
+      const user = (r.data || [])[0];
+      if (!user || !user.reset_exp || Number(user.reset_exp) < Date.now()) return res.status(400).json({ error: "Link ungültig oder abgelaufen" });
+      const salt = crypto.randomBytes(16).toString("hex");
+      const upd = await supabase.from("app_users").update({ hash: hashPassword(newPassword, salt), salt, reset_hash: null, reset_exp: null }).eq("id", user.id);
       if (upd.error) throw upd.error;
       return res.json({ ok: true });
     }
