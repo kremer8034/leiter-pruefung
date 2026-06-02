@@ -446,6 +446,7 @@ export default function App() {
   const [authReady, setAuthReady]     = useState(false);  // Auth-Status geprüft
   const [inspectors, setInspectors]   = useState([]);     // aktive Prüfer (für Auswahl)
   const [settingsTab, setSettingsTab] = useState("allgemein"); // aktiver Einstellungs-Reiter
+  const [pwModalOpen, setPwModalOpen] = useState(false);  // Dialog „Passwort ändern"
 
   const showToast = (msg, type="success") => { setToast({msg,type}); setTimeout(()=>setToast(null),2800); };
 
@@ -580,6 +581,7 @@ export default function App() {
   return (
     <div style={S.shell}>
       {toast && <div style={{...S.toast,background:toast.type==="success"?"#2d6a4f":"#c1121f"}}>{toast.msg}</div>}
+      {pwModalOpen && <PasswordModal onClose={()=>setPwModalOpen(false)} showToast={showToast} />}
 
       <header style={S.header}>
         <div style={S.headerLeft}>
@@ -618,12 +620,20 @@ export default function App() {
             );
           })}
         </div>
-        <div style={{padding:"16px 24px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
-          <div style={{color:"#fff",fontSize:14,fontWeight:700}}>{currentUser.name}</div>
-          <div style={{color:"rgba(255,255,255,0.6)",fontSize:12,marginBottom:10}}>
-            {currentUser.role==="admin"?"Administrator":"Prüfer/in"}{currentUser.email?` · ${currentUser.email}`:""}
+        <div style={{padding:"14px 20px",borderTop:"1px solid rgba(255,255,255,0.12)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:12}}>
+            <div style={S.avatar}>{userInitials(currentUser.name)}</div>
+            <div style={{minWidth:0}}>
+              <div style={{color:"#fff",fontSize:14,fontWeight:700,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{currentUser.name}</div>
+              <div style={{color:"rgba(255,255,255,0.6)",fontSize:12,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>
+                {currentUser.role==="admin"?"Administrator":"Prüfer/in"}{currentUser.email?` · ${currentUser.email}`:""}
+              </div>
+            </div>
           </div>
-          <button style={{...S.secondaryBtn,width:"100%",padding:"10px 14px"}} onClick={()=>{setMenuOpen(false);logout();}}>Abmelden</button>
+          <div style={{display:"flex",gap:8}}>
+            <button style={S.drawerAccountBtn} onClick={()=>{setMenuOpen(false);setPwModalOpen(true);}}>🔑 Passwort</button>
+            <button style={S.drawerAccountBtn} onClick={()=>{setMenuOpen(false);logout();}}>↪ Abmelden</button>
+          </div>
         </div>
       </nav>
 
@@ -839,6 +849,48 @@ function LoginForm({ onSuccess, compact }) {
       <button style={{ ...S.primaryBtn, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
         {busy ? "Anmelden…" : "Anmelden"}
       </button>
+    </div>
+  );
+}
+
+// Initialen aus dem Namen (für Profil-Avatar)
+function userInitials(name) {
+  return String(name || "").trim().split(/\s+/).filter(Boolean).slice(0, 2).map(s => s[0].toUpperCase()).join("") || "?";
+}
+
+// ─── Dialog „Passwort ändern" ───
+function PasswordModal({ onClose, showToast }) {
+  const [cur, setCur] = useState("");
+  const [nw, setNw]   = useState("");
+  const [nw2, setNw2] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr]   = useState("");
+
+  const submit = async () => {
+    if (!cur) { setErr("Bitte aktuelles Passwort eingeben."); return; }
+    if (nw.length < 6) { setErr("Neues Passwort: mindestens 6 Zeichen."); return; }
+    if (nw !== nw2) { setErr("Die neuen Passwörter stimmen nicht überein."); return; }
+    setBusy(true); setErr("");
+    try { await changeOwnPassword(cur, nw); showToast("Passwort geändert"); onClose(); }
+    catch (e) { setErr(e.message || "Änderung fehlgeschlagen"); setBusy(false); }
+  };
+
+  return (
+    <div style={S.modalOverlay} onClick={onClose}>
+      <div style={S.modalBox} onClick={e => e.stopPropagation()}>
+        <h3 style={{ margin:"0 0 6px", fontSize:18 }}>Passwort ändern</h3>
+        <p style={{ margin:"0 0 16px", fontSize:14, color:"#888" }}>Ändere dein persönliches Anmelde-Passwort.</p>
+        <Field label="Aktuelles Passwort" value={cur} onChange={setCur} placeholder="Aktuelles Passwort" type="password" />
+        <Field label="Neues Passwort" value={nw} onChange={setNw} placeholder="mind. 6 Zeichen" type="password" />
+        <Field label="Neues Passwort wiederholen" value={nw2} onChange={setNw2} placeholder="Wiederholen" type="password" />
+        {err && <div style={{ color:"#c1121f", fontSize:13, marginBottom:10 }}>✗ {err}</div>}
+        <div style={{ display:"flex", gap:10, marginTop:6 }}>
+          <button style={{ ...S.secondaryBtn, flex:1 }} onClick={onClose}>Abbrechen</button>
+          <button style={{ ...S.primaryBtn, flex:2, marginTop:0, opacity: busy ? 0.6 : 1 }} disabled={busy} onClick={submit}>
+            {busy ? "Wird geändert…" : "🔑 Ändern"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1755,23 +1807,6 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
   const [userForm, setUserForm] = useState(null); // null | {id?, name, email, role, active, password}
   const [userBusy, setUserBusy] = useState(false);
   const [remBusy, setRemBusy]   = useState(false);
-  const [pwCur, setPwCur]   = useState("");
-  const [pwNew, setPwNew]   = useState("");
-  const [pwNew2, setPwNew2] = useState("");
-  const [pwBusy, setPwBusy] = useState(false);
-
-  const changePassword = async () => {
-    if (!pwCur) { showToast("Bitte aktuelles Passwort eingeben","error"); return; }
-    if (pwNew.length < 6) { showToast("Neues Passwort: mind. 6 Zeichen","error"); return; }
-    if (pwNew !== pwNew2) { showToast("Die neuen Passwörter stimmen nicht überein","error"); return; }
-    setPwBusy(true);
-    try {
-      await changeOwnPassword(pwCur, pwNew);
-      setPwCur(""); setPwNew(""); setPwNew2("");
-      showToast("Passwort geändert");
-    } catch (e) { showToast(e.message, "error"); }
-    setPwBusy(false);
-  };
 
   const sendReminders = async () => {
     if (!confirm("Jetzt Erinnerungs-E-Mails für alle fälligen Leitern senden?")) return;
@@ -1874,16 +1909,6 @@ function SettingsView({ settings, saveSettings, locations, saveLocations, ladder
               <div style={{fontSize:13,color:"#888"}}>{isAdmin?"Administrator":"Prüfer/in"}{currentUser?.email?` · ${currentUser.email}`:""}</div>
             </div>
             <button style={{...S.secondaryBtn,padding:"10px 18px"}} onClick={logout}>Abmelden</button>
-          </div>
-
-          <div style={S.settingsSection}>
-            <h3 style={S.sectionTitle}>Mein Passwort ändern</h3>
-            <Field label="Aktuelles Passwort" value={pwCur} onChange={setPwCur} placeholder="Aktuelles Passwort" type="password" />
-            <Field label="Neues Passwort" value={pwNew} onChange={setPwNew} placeholder="mind. 6 Zeichen" type="password" />
-            <Field label="Neues Passwort wiederholen" value={pwNew2} onChange={setPwNew2} placeholder="Wiederholen" type="password" />
-            <button style={{...S.primaryBtn,opacity:pwBusy?0.6:1}} disabled={pwBusy} onClick={changePassword}>
-              {pwBusy ? "Wird geändert…" : "🔑 Passwort ändern"}
-            </button>
           </div>
 
           <div style={S.settingsSection}>
@@ -2157,6 +2182,8 @@ const S = {
   navIcon:      { fontSize:20, width:26, textAlign:"center" },
   navSubItem:   { display:"flex", alignItems:"center", gap:12, padding:"11px 24px 11px 42px", background:"none", border:"none", color:"rgba(255,255,255,0.72)", fontSize:14, cursor:"pointer", textAlign:"left", width:"100%", minHeight:44 },
   navSubItemActive:{ background:"rgba(227,6,19,0.22)", color:"#fff", borderRight:`3px solid ${DRK}` },
+  avatar:       { width:40, height:40, borderRadius:"50%", background:DRK, color:"#fff", display:"flex", alignItems:"center", justifyContent:"center", fontWeight:700, fontSize:15, flexShrink:0, letterSpacing:0.5 },
+  drawerAccountBtn:{ flex:1, background:"rgba(255,255,255,0.1)", color:"#fff", border:"1px solid rgba(255,255,255,0.25)", borderRadius:10, padding:"11px 8px", fontSize:13, fontWeight:600, cursor:"pointer", minHeight:44 },
 
   tabBar:      { position:"fixed", bottom:0, left:0, right:0, background:"#fff", display:"flex", zIndex:100, boxShadow:"0 -2px 8px rgba(0,0,0,0.1)", borderTop:`2px solid ${DRK}`, paddingBottom:"env(safe-area-inset-bottom,0px)" },
   tabItem:     { flex:1, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center", gap:2, padding:"7px 0", margin:"6px 5px", background:"none", border:"none", color:"#777", cursor:"pointer", minHeight:50, borderRadius:14, fontWeight:600, transition:"background 0.15s,color 0.15s" },
